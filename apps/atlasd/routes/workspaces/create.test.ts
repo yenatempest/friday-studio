@@ -13,10 +13,15 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import type { AppContext, AppVariables } from "../../src/factory.ts";
 
 // Mock storage (FilesystemWorkspaceCreationAdapter used in create)
+const mockWriteWorkspaceFiles = vi.hoisted(() =>
+  vi.fn<(path: string, yaml: string, opts?: unknown) => Promise<void>>().mockResolvedValue(
+    undefined,
+  ),
+);
 vi.mock("@atlas/storage", () => ({
   FilesystemWorkspaceCreationAdapter: class {
     createWorkspaceDirectory = vi.fn().mockResolvedValue("/tmp/test-ws");
-    writeWorkspaceFiles = vi.fn().mockResolvedValue(undefined);
+    writeWorkspaceFiles = mockWriteWorkspaceFiles;
   },
 }));
 
@@ -138,6 +143,28 @@ function configWithMissingCredentials() {
   };
 }
 
+/** Config with one unfilled `workspace_config` entry. */
+function configWithUnfilledWorkspaceConfig() {
+  return {
+    version: "1.0",
+    workspace: { name: "Test Workspace" },
+    workspace_config: {
+      api_key: { description: "API key", value: null },
+    },
+  };
+}
+
+/** Config with all `workspace_config` entries filled. */
+function configWithFilledWorkspaceConfig() {
+  return {
+    version: "1.0",
+    workspace: { name: "Test Workspace" },
+    workspace_config: {
+      api_key: { description: "API key", value: "secret-1" },
+    },
+  };
+}
+
 type JsonBody = Record<string, unknown>;
 
 function createTestApp() {
@@ -234,7 +261,7 @@ async function mountRoutes(app: Hono<AppVariables>) {
   return app;
 }
 
-describe("POST /create — requires_setup flag", () => {
+describe("POST /create — credentials and skipEnvValidation", () => {
   beforeEach(() => {
     vi.resetModules();
     mockResolveCredentialsByProvider.mockReset();
@@ -242,7 +269,7 @@ describe("POST /create — requires_setup flag", () => {
     mockWriteFile.mockReset().mockResolvedValue(undefined);
   });
 
-  test("sets requires_setup: true when credentials cannot be resolved", {
+  test("skips env validation when credentials cannot be resolved", {
     timeout: 15_000,
   }, async () => {
     const { app, registerWorkspace, updateWorkspaceStatus } = createTestApp();
@@ -269,15 +296,11 @@ describe("POST /create — requires_setup flag", () => {
       expect.objectContaining({ skipEnvValidation: true }),
     );
 
-    // requires_setup should be set via updateWorkspaceStatus
-    expect(updateWorkspaceStatus).toHaveBeenCalledWith(
-      "ws-new-id",
-      "inactive",
-      expect.objectContaining({ metadata: expect.objectContaining({ requires_setup: true }) }),
-    );
+    // No metadata.requires_setup write — derived flag now lives in the response
+    expect(updateWorkspaceStatus).not.toHaveBeenCalled();
   });
 
-  test("does not set requires_setup when all credentials resolve", async () => {
+  test("runs env validation when all credentials resolve", async () => {
     const { app, registerWorkspace, updateWorkspaceStatus } = createTestApp();
     await mountRoutes(app);
 
@@ -293,17 +316,15 @@ describe("POST /create — requires_setup flag", () => {
     const body = (await response.json()) as JsonBody;
     expect(body.success).toBe(true);
 
-    // Env validation NOT skipped when all credentials resolve
     expect(registerWorkspace).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ skipEnvValidation: false }),
     );
 
-    // updateWorkspaceStatus should NOT have been called with requires_setup
     expect(updateWorkspaceStatus).not.toHaveBeenCalled();
   });
 
-  test("does not set requires_setup when no credentials needed", async () => {
+  test("runs env validation when no credentials are needed", async () => {
     const { app, updateWorkspaceStatus } = createTestApp();
     await mountRoutes(app);
 
@@ -317,11 +338,10 @@ describe("POST /create — requires_setup flag", () => {
     const body = (await response.json()) as JsonBody;
     expect(body.success).toBe(true);
 
-    // No credentials to resolve for config setup, no requires_setup needed
     expect(updateWorkspaceStatus).not.toHaveBeenCalled();
   });
 
-  test("partial resolution: resolves what it can, sets requires_setup for the rest", async () => {
+  test("partial resolution: skips env validation, returns resolvedCredentials", async () => {
     const { app, registerWorkspace, updateWorkspaceStatus } = createTestApp();
     await mountRoutes(app);
 
@@ -344,25 +364,99 @@ describe("POST /create — requires_setup flag", () => {
     const body = (await response.json()) as JsonBody;
     expect(body.success).toBe(true);
 
-    // Env validation skipped because slack is unresolved
     expect(registerWorkspace).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ skipEnvValidation: true }),
     );
 
-    // Partially resolved — still needs setup
-    expect(updateWorkspaceStatus).toHaveBeenCalledWith(
-      "ws-new-id",
-      "inactive",
-      expect.objectContaining({ metadata: expect.objectContaining({ requires_setup: true }) }),
-    );
+    expect(updateWorkspaceStatus).not.toHaveBeenCalled();
 
-    // The resolved credential should be included in the response
     expect(body.resolvedCredentials).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ provider: "github", credentialId: "cred-gh" }),
       ]),
     );
+  });
+});
+
+describe("POST /create — setupRequired in response", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockResolveCredentialsByProvider.mockReset();
+    mockFetchLinkCredential.mockReset();
+    mockWriteFile.mockReset().mockResolvedValue(undefined);
+    mockWriteWorkspaceFiles.mockReset().mockResolvedValue(undefined);
+  });
+
+  test("returns setupRequired: true with matching configKeys when an entry is unfilled", async () => {
+    const { app } = createTestApp();
+    await mountRoutes(app);
+
+    const response = await app.request("/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: configWithUnfilledWorkspaceConfig() }),
+    });
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as JsonBody;
+    expect(body.setupRequired).toBe(true);
+    expect(body.setup_requirements).toMatchObject({
+      configKeys: [{ key: "api_key", description: "API key" }],
+    });
+  });
+
+  test("returns setupRequired: false with no setup_requirements when all entries are filled", async () => {
+    const { app } = createTestApp();
+    await mountRoutes(app);
+
+    const response = await app.request("/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: configWithFilledWorkspaceConfig() }),
+    });
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as JsonBody;
+    expect(body.setupRequired).toBe(false);
+    expect(body.setup_requirements).toBeUndefined();
+  });
+
+  test("returns setupRequired: false when no workspace_config block is present", async () => {
+    const { app } = createTestApp();
+    await mountRoutes(app);
+
+    const response = await app.request("/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: configWithNoCredentials() }),
+    });
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as JsonBody;
+    expect(body.setupRequired).toBe(false);
+    expect(body.setup_requirements).toBeUndefined();
+  });
+
+  test("preserves single-credential auto-pin: pinned id lands in YAML", async () => {
+    const { app } = createTestApp();
+    await mountRoutes(app);
+
+    mockResolveCredentialsByProvider.mockResolvedValue([{ id: "cred-1", label: "My GitHub" }]);
+
+    const response = await app.request("/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: configWithProvider("github") }),
+    });
+
+    expect(response.status).toBe(201);
+
+    expect(mockWriteWorkspaceFiles).toHaveBeenCalledTimes(1);
+    const yamlPayload = mockWriteWorkspaceFiles.mock.calls[0]?.[1];
+    expect(typeof yamlPayload).toBe("string");
+    expect(yamlPayload).toContain("id: cred-1");
+    expect(yamlPayload).toContain("provider: github");
   });
 });
 

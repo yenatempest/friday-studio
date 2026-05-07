@@ -45,6 +45,7 @@ export type {
 } from "./src/setup-requirements.ts";
 export {
   hasUnfilledConfigKeys,
+  resolveConfigOnlySetupRequirements,
   resolveWorkspaceSetupRequirements,
 } from "./src/setup-requirements.ts";
 // Storage factories and registry adapter

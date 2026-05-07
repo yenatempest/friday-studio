@@ -75,6 +75,16 @@ export function hasUnfilledConfigKeys(config: WorkspaceConfig): boolean {
 }
 
 /**
+ * Sync slice — config-keys only. No Link required. For routes that compute
+ * setup state pre-Session (`/create`, `/import-bundle`).
+ */
+export function resolveConfigOnlySetupRequirements(config: WorkspaceConfig): SetupStatus {
+  const configKeys = collectConfigKeyRequirements(config);
+  if (configKeys.length === 0) return { requires_setup: false };
+  return { requires_setup: true, setup_requirements: { configKeys } };
+}
+
+/**
  * Derive a workspace's Setup Status from its parsed config.
  *
  * Config Requirements: a `workspace_config` entry is unfilled iff

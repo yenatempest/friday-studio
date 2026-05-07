@@ -46,6 +46,7 @@ import { createLogger, logger } from "@atlas/logger";
 import { createMCPTools } from "@atlas/mcp";
 import { resolveVisibleSkills, SkillStorage } from "@atlas/skills";
 import { FilesystemWorkspaceCreationAdapter } from "@atlas/storage";
+import { resolveConfigOnlySetupRequirements } from "@atlas/workspace";
 import { ColorSchema, isErrnoException, stringifyError } from "@atlas/utils";
 import { getFridayHome } from "@atlas/utils/paths.server";
 import { zValidator } from "@hono/zod-validator";
@@ -563,6 +564,10 @@ const workspacesRoutes = daemonFactory
         );
       }
 
+      // Derive setup status from the post-pin parsed config. Config-only for
+      // now; credential detection runs through the daemon path (#10).
+      const setupStatus = resolveConfigOnlySetupRequirements(validatedConfig);
+
       const yamlConfig = stringify(validatedConfig, { indent: 2, lineWidth: 100 });
 
       const workspaceAdapter = new FilesystemWorkspaceCreationAdapter();
@@ -596,14 +601,6 @@ const workspacesRoutes = daemonFactory
           skipEnvValidation: hasUnresolvedCredentials,
         });
 
-        // Set requires_setup flag if any credentials are missing or were stripped
-        if (hasUnresolvedCredentials && created) {
-          await manager.updateWorkspaceStatus(workspace.id, workspace.status, {
-            metadata: { ...workspace.metadata, requires_setup: true },
-          });
-          workspace.metadata = { ...workspace.metadata, requires_setup: true };
-        }
-
         // Resources subsystem was deleted (Ledger). Any incoming `resources:`
         // block in the imported config is silently dropped — no-op in the new
         // world. The schema parser also strips it before we get here.
@@ -615,6 +612,10 @@ const workspacesRoutes = daemonFactory
             created,
             workspacePath,
             filesCreated: [ephemeral ? "eph_workspace.yml" : "workspace.yml", ".env"],
+            setupRequired: setupStatus.requires_setup,
+            ...(setupStatus.setup_requirements
+              ? { setup_requirements: setupStatus.setup_requirements }
+              : {}),
             ...(resolvedCredentials && resolvedCredentials.length > 0
               ? { resolvedCredentials }
               : {}),

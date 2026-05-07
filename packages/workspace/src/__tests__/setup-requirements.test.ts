@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type CredentialOption,
   hasUnfilledConfigKeys,
+  resolveConfigOnlySetupRequirements,
   type ResolveDeps,
   resolveWorkspaceSetupRequirements,
 } from "../setup-requirements.ts";
@@ -68,6 +69,42 @@ describe("hasUnfilledConfigKeys", () => {
   ])("treats value: %s as filled", (_label, value) => {
     const config = parse({ workspace_config: { k: { value } } });
     expect(hasUnfilledConfigKeys(config)).toBe(false);
+  });
+});
+
+describe("resolveConfigOnlySetupRequirements", () => {
+  it("returns requires_setup: false when no workspace_config block is present", () => {
+    expect(resolveConfigOnlySetupRequirements(parse({}))).toEqual({ requires_setup: false });
+  });
+
+  it("returns requires_setup: false when every entry has a non-null value", () => {
+    const config = parse({
+      workspace_config: { api_key: { description: "API key", value: "secret" } },
+    });
+    expect(resolveConfigOnlySetupRequirements(config)).toEqual({ requires_setup: false });
+  });
+
+  it("returns requires_setup: true with matching configKeys when an entry is unfilled", () => {
+    const config = parse({
+      workspace_config: {
+        api_key: { description: "API key", value: null },
+        region: { value: "us-east-1" },
+      },
+    });
+    expect(resolveConfigOnlySetupRequirements(config)).toEqual({
+      requires_setup: true,
+      setup_requirements: { configKeys: [{ key: "api_key", description: "API key" }] },
+    });
+  });
+
+  it("treats undefined value the same as null", () => {
+    const config = parse({
+      workspace_config: { api_key: { description: "API key" } },
+    });
+    expect(resolveConfigOnlySetupRequirements(config)).toEqual({
+      requires_setup: true,
+      setup_requirements: { configKeys: [{ key: "api_key", description: "API key" }] },
+    });
   });
 });
 
