@@ -37,10 +37,16 @@ export type {
   ConfigKeyRequirement,
   CredentialOption,
   CredentialRequirement,
+  OverridableRef,
+  ResolvedSetupStatus,
+  ResolveDeps,
   SetupRequirements,
   SetupStatus,
 } from "./src/setup-requirements.ts";
-export { resolveWorkspaceSetupRequirements } from "./src/setup-requirements.ts";
+export {
+  hasUnfilledConfigKeys,
+  resolveWorkspaceSetupRequirements,
+} from "./src/setup-requirements.ts";
 // Storage factories and registry adapter
 export {
   createJetStreamKVStorage,
