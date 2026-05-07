@@ -93,6 +93,24 @@
   type CredentialRequirement = z.infer<typeof CredentialRequirementSchema>;
 
   /**
+   * Subset of Link's `GET /v1/summary?provider=X` credentials list used to
+   * render the override picker. Currently-resolved credential metadata is
+   * derived client-side: the credential with `isDefault: true` is the one
+   * `getDefaultByProvider` hands back to the resolver.
+   */
+  const CredentialSummarySchema = z.object({
+    id: z.string(),
+    label: z.string(),
+    displayName: z.string().nullable().optional(),
+    userIdentifier: z.string().nullable().optional(),
+    isDefault: z.boolean(),
+  });
+  const SummaryResponseSchema = z.object({
+    credentials: z.array(CredentialSummarySchema),
+  });
+  type CredentialSummary = z.infer<typeof CredentialSummarySchema>;
+
+  /**
    * Schema for the parsed config's link refs. Used to walk the YAML and build
    * a `provider → path[]` map so per-provider blocks know which ref paths
    * (`mcp:<serverId>:<envVar>` / `agent:<agentId>:<envVar>`) they bind.
@@ -237,6 +255,27 @@
     return out;
   });
 
+  /**
+   * Provider-only refs whose default resolves (i.e. NOT in
+   * `credentialRequirements`) and so are eligible for opt-in pinning.
+   * Functionally equivalent to the server's `overridableRefs` payload but
+   * derived client-side from the same parsed config the Requirements blocks
+   * already walk — saves the route handler from forwarding a third field.
+   */
+  const overridableRefs = $derived.by((): { path: string; provider: string }[] => {
+    const requiredProviders = new Set(credentialRequirements.map((r) => r.provider));
+    const out: { path: string; provider: string }[] = [];
+    for (const [provider, paths] of pathsByProvider) {
+      if (requiredProviders.has(provider)) continue;
+      for (const path of paths) out.push({ path, provider });
+    }
+    return out;
+  });
+
+  const overridableProviders = $derived.by((): string[] => {
+    return [...new Set(overridableRefs.map((r) => r.provider))];
+  });
+
   let values = $state<Record<string, string>>({});
   let credentialChoices = $state<Record<string, string>>({});
 
@@ -265,6 +304,18 @@
   });
   let providerDetails = $state<Record<string, ProviderDetails | null>>({});
   let apiKeyExpanded = $state<Record<string, boolean>>({});
+
+  /**
+   * Override section UI state. `overridesExpanded` collapses the whole
+   * section by default. `overrideRefExpanded` tracks per-ref picker
+   * expansion (`mcp:slack:SLACK_TOKEN` → showing radios). `apiKeyOverrideExpanded`
+   * is the override-section's own apikey form expansion, kept separate from
+   * the Requirement block's `apiKeyExpanded` so each can open independently.
+   */
+  let overridesExpanded = $state(false);
+  let overrideRefExpanded = $state<Record<string, boolean>>({});
+  let apiKeyOverrideExpanded = $state<Record<string, boolean>>({});
+  let overrideCredentials = $state<Record<string, CredentialSummary[] | null>>({});
 
   // Seed config inputs for any newly-seen key. Setup mode seeds empty strings;
   // edit mode seeds from each entry's existing `value`. Preserves any
@@ -333,13 +384,43 @@
     };
   });
 
+  /**
+   * Override-section callback wiring. Mirrors the Requirements wiring but
+   * binds the new credential id only to the single override ref the user
+   * was working on (tracked via the most-recently-expanded picker), not to
+   * every ref of that provider — overriding is per-ref by design.
+   */
+  let lastOverridePathByProvider = $state<Record<string, string>>({});
+  $effect(() => {
+    if (!browser) return;
+    const cleanups: Array<() => void> = [];
+    for (const provider of overridableProviders) {
+      const connect = getConnect(provider);
+      const cleanup = connect.listenForCallback((message) => {
+        const path = lastOverridePathByProvider[provider];
+        if (path) credentialChoices[path] = message.credentialId;
+        if (workspaceId) {
+          void queryClient.invalidateQueries({
+            queryKey: workspaceQueries.config(workspaceId).queryKey,
+          });
+        }
+      });
+      cleanups.push(cleanup);
+    }
+    return () => {
+      for (const c of cleanups) c();
+    };
+  });
+
   // Fetch provider details on demand (one call per provider). Triggers when a
   // new credential block appears. Failures collapse to `null` so the block
   // falls back to the OAuth flow — better than blocking the page on a fetch.
   $effect(() => {
     if (!browser) return;
-    for (const req of credentialRequirements) {
-      const provider = req.provider;
+    const seen = new Set<string>();
+    for (const req of credentialRequirements) seen.add(req.provider);
+    for (const provider of overridableProviders) seen.add(provider);
+    for (const provider of seen) {
       if (provider in providerDetails) continue;
       providerDetails[provider] = null;
       void fetch(`/api/daemon/api/link/v1/providers/${encodeURIComponent(provider)}`)
@@ -351,6 +432,33 @@
         })
         .catch(() => {
           // Swallow — block falls back to OAuth.
+        });
+    }
+  });
+
+  /**
+   * Fetch credential summaries for every overridable provider so the picker
+   * can show options and the section header can show currently-resolved
+   * metadata (`displayName` / `userIdentifier` of the `isDefault` cred).
+   * Mirrors `linkProviderQueries.credentialsByProvider` but inlined to keep
+   * the fetch lifecycle attached to this page's reactivity.
+   */
+  $effect(() => {
+    if (!browser) return;
+    for (const provider of overridableProviders) {
+      if (provider in overrideCredentials) continue;
+      overrideCredentials[provider] = null;
+      const url = new URL("/api/daemon/api/link/v1/summary", globalThis.location.origin);
+      url.searchParams.set("provider", provider);
+      void fetch(url.href)
+        .then(async (res) => {
+          if (!res.ok) return;
+          const parsed = SummaryResponseSchema.safeParse(await res.json());
+          if (!parsed.success) return;
+          overrideCredentials[provider] = parsed.data.credentials;
+        })
+        .catch(() => {
+          // Swallow — section degrades gracefully (no metadata, no options).
         });
     }
   });
@@ -371,6 +479,45 @@
         queryKey: workspaceQueries.config(workspaceId).queryKey,
       });
     }
+  }
+
+  async function handleOverrideApiKeySubmit(
+    path: string,
+    provider: string,
+    label: string,
+    secret: Record<string, string>,
+  ) {
+    const connect = getConnect(provider);
+    const newId = await connect.submitApiKey(label, secret);
+    if (!newId) return;
+    credentialChoices[path] = newId;
+    apiKeyOverrideExpanded[path] = false;
+    if (workspaceId) {
+      await queryClient.invalidateQueries({
+        queryKey: workspaceQueries.config(workspaceId).queryKey,
+      });
+    }
+  }
+
+  /**
+   * Resolve the credential summary the workspace currently uses for an
+   * override ref. If the user has pinned via this session, prefer that;
+   * otherwise fall back to the provider's default (`isDefault: true`),
+   * which is what the server-side resolver picked.
+   */
+  function resolvedFor(
+    path: string,
+    provider: string,
+  ): CredentialSummary | undefined {
+    const list = overrideCredentials[provider];
+    if (!list) return undefined;
+    const pinnedId = credentialChoices[path];
+    if (pinnedId) return list.find((c) => c.id === pinnedId);
+    return list.find((c) => c.isDefault);
+  }
+
+  function summaryLabel(c: CredentialSummary): string {
+    return c.displayName ?? c.userIdentifier ?? c.label;
   }
 
   const allConfigFilled = $derived(
@@ -586,6 +733,157 @@
         </fieldset>
       {/each}
 
+      {#if overridableRefs.length > 0}
+        <section class="override-section">
+          <button
+            type="button"
+            class="override-toggle"
+            aria-expanded={overridesExpanded}
+            onclick={() => (overridesExpanded = !overridesExpanded)}
+          >
+            <span class="override-chevron" class:open={overridesExpanded} aria-hidden="true">›</span>
+            <span class="override-toggle-text">
+              <span class="override-title">Pin credentials per-workspace</span>
+              <span class="override-hint">
+                Optional. Use a specific account for this workspace instead of your default.
+              </span>
+            </span>
+          </button>
+
+          {#if overridesExpanded}
+            <ul class="override-list">
+              {#each overridableRefs as ref (ref.path)}
+                {@const connect = getConnect(ref.provider)}
+                {@const details = providerDetails[ref.provider] ?? null}
+                {@const list = overrideCredentials[ref.provider] ?? []}
+                {@const resolved = resolvedFor(ref.path, ref.provider)}
+                {@const groupName = `override-${ref.path}`}
+                <li class="override-item">
+                  <div class="override-item-head">
+                    <div class="override-item-meta">
+                      <span class="override-item-path">{ref.path}</span>
+                      {#if resolved}
+                        <span class="override-item-using">
+                          using <strong>{summaryLabel(resolved)}</strong>
+                          {#if resolved.isDefault && credentialChoices[ref.path] === undefined}
+                            <span class="override-item-default-tag">default</span>
+                          {/if}
+                        </span>
+                      {:else if list.length === 0 && ref.provider in overrideCredentials}
+                        <span class="override-item-using muted">No connected account</span>
+                      {/if}
+                    </div>
+                    {#if !overrideRefExpanded[ref.path]}
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="small"
+                        onclick={() => (overrideRefExpanded[ref.path] = true)}
+                        disabled={submitting}
+                      >
+                        Pin a different account
+                      </Button>
+                    {/if}
+                  </div>
+
+                  {#if overrideRefExpanded[ref.path]}
+                    <div class="override-picker">
+                      {#if list.length > 0}
+                        <div class="cred-options" role="radiogroup">
+                          {#each list as option (option.id)}
+                            <label class="cred-option" class:selected={credentialChoices[ref.path] === option.id}>
+                              <input
+                                type="radio"
+                                name={groupName}
+                                value={option.id}
+                                checked={credentialChoices[ref.path] === option.id}
+                                onchange={() => {
+                                  credentialChoices[ref.path] = option.id;
+                                }}
+                                disabled={submitting}
+                              />
+                              <span class="cred-option-text">
+                                <span class="cred-option-name">{summaryLabel(option)}</span>
+                                {#if option.userIdentifier && option.userIdentifier !== summaryLabel(option)}
+                                  <span class="cred-option-meta">{option.userIdentifier}</span>
+                                {/if}
+                                {#if option.isDefault}
+                                  <span class="cred-option-default">default</span>
+                                {/if}
+                              </span>
+                            </label>
+                          {/each}
+                        </div>
+                      {/if}
+
+                      {#if details?.type === "apikey"}
+                        {#if apiKeyOverrideExpanded[ref.path]}
+                          <CredentialSecretForm
+                            secretSchema={details.secretSchema ?? {}}
+                            submitting={connect.submitting}
+                            error={connect.error}
+                            onSubmit={(label, secret) =>
+                              handleOverrideApiKeySubmit(ref.path, ref.provider, label, secret)}
+                            onCancel={() => (apiKeyOverrideExpanded[ref.path] = false)}
+                          />
+                        {:else}
+                          <div class="cred-actions">
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="small"
+                              onclick={() => (apiKeyOverrideExpanded[ref.path] = true)}
+                              disabled={submitting}
+                            >
+                              Connect another account
+                            </Button>
+                          </div>
+                        {/if}
+                      {:else}
+                        <div class="cred-actions">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="small"
+                            onclick={() => {
+                              lastOverridePathByProvider[ref.provider] = ref.path;
+                              if (details?.type === "app_install") connect.startAppInstall();
+                              else connect.startOAuth();
+                            }}
+                            disabled={submitting}
+                          >
+                            Connect another account
+                          </Button>
+                          {#if connect.popupBlocked && connect.blockedUrl}
+                            <a class="cred-fallback" href={connect.blockedUrl} target="_blank" rel="noreferrer">
+                              Continue in this tab
+                            </a>
+                          {/if}
+                        </div>
+                      {/if}
+                      {#if connect.error}
+                        <p class="cred-error">{connect.error}</p>
+                      {/if}
+
+                      <div class="override-picker-actions">
+                        <button
+                          type="button"
+                          class="override-collapse"
+                          onclick={() => (overrideRefExpanded[ref.path] = false)}
+                          disabled={submitting}
+                        >
+                          Done
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {/if}
+
       {#if errorMessage}
         <p class="error">{errorMessage}</p>
       {/if}
@@ -785,6 +1083,145 @@
     color: var(--color-error);
     font-size: var(--font-size-2);
     margin: 0;
+  }
+
+  .override-section {
+    border-top: 1px solid var(--color-border-1);
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-3);
+    padding-block-start: var(--size-4);
+  }
+
+  .override-toggle {
+    align-items: flex-start;
+    background: transparent;
+    border: 0;
+    color: var(--color-text);
+    cursor: pointer;
+    display: flex;
+    gap: var(--size-2);
+    padding: 0;
+    text-align: start;
+  }
+
+  .override-toggle:hover .override-title {
+    color: color-mix(in srgb, var(--color-text), transparent 0%);
+  }
+
+  .override-chevron {
+    color: color-mix(in srgb, var(--color-text), transparent 35%);
+    display: inline-block;
+    font-size: var(--font-size-3);
+    line-height: 1;
+    transform: rotate(0deg);
+    transition: transform 150ms ease;
+  }
+
+  .override-chevron.open {
+    transform: rotate(90deg);
+  }
+
+  .override-toggle-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .override-title {
+    color: var(--color-text);
+    font-size: var(--font-size-2);
+    font-weight: var(--font-weight-6);
+  }
+
+  .override-hint {
+    color: color-mix(in srgb, var(--color-text), transparent 35%);
+    font-size: var(--font-size-1);
+    line-height: var(--font-lineheight-3);
+  }
+
+  .override-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-2);
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .override-item {
+    background-color: var(--color-surface-1);
+    border: 1px solid var(--color-border-1);
+    border-radius: var(--radius-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-3);
+    padding: var(--size-3) var(--size-4);
+  }
+
+  .override-item-head {
+    align-items: center;
+    display: flex;
+    gap: var(--size-3);
+    justify-content: space-between;
+  }
+
+  .override-item-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .override-item-path {
+    color: var(--color-text);
+    font-family: var(--font-family-monospace);
+    font-size: var(--font-size-1);
+    overflow-wrap: anywhere;
+  }
+
+  .override-item-using {
+    color: color-mix(in srgb, var(--color-text), transparent 25%);
+    font-size: var(--font-size-2);
+  }
+
+  .override-item-using.muted {
+    color: color-mix(in srgb, var(--color-text), transparent 45%);
+  }
+
+  .override-item-default-tag {
+    background-color: color-mix(in srgb, var(--color-accent), transparent 80%);
+    border-radius: var(--radius-1);
+    color: var(--color-accent);
+    font-size: var(--font-size-1);
+    margin-inline-start: var(--size-1);
+    padding: 0 var(--size-1);
+  }
+
+  .override-picker {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-3);
+  }
+
+  .override-picker-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .override-collapse {
+    background: transparent;
+    border: 0;
+    color: color-mix(in srgb, var(--color-text), transparent 30%);
+    cursor: pointer;
+    font-size: var(--font-size-2);
+    padding: 0;
+    text-decoration: underline;
+  }
+
+  .override-collapse:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
   }
 
   .error {
