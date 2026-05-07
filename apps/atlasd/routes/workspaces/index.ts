@@ -15,6 +15,7 @@ import {
   applyMutation,
   type CredentialUsage,
   extractCredentials,
+  setWorkspaceConfigValues,
   stripCredentialRefs,
   toIdRefs,
   toProviderRefs,
@@ -67,6 +68,7 @@ import {
   buildWorkspaceBundleBytes,
   isOnDiskWorkspace,
   materializeImportedMemory,
+  scrubWorkspaceConfigValues,
 } from "./bundle-helpers.ts";
 import { DEFAULT_WORKSPACE_MEMORY } from "./default-workspace-config.ts";
 import {
@@ -1007,7 +1009,12 @@ const workspacesRoutes = daemonFactory
 
       // Strip workspace.id - it will be regenerated on import
       const { id: _id, ...workspaceIdentity } = portableConfig.workspace;
-      const exportConfig = { ...portableConfig, workspace: workspaceIdentity };
+      const scrubbedWorkspaceConfig = scrubWorkspaceConfigValues(portableConfig.workspace_config);
+      const exportConfig = {
+        ...portableConfig,
+        workspace: workspaceIdentity,
+        ...(scrubbedWorkspaceConfig ? { workspace_config: scrubbedWorkspaceConfig } : {}),
+      };
 
       const yamlContent = stringify(exportConfig, { indent: 2, lineWidth: 100 });
 

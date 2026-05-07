@@ -557,4 +557,63 @@ describe("GET /:workspaceId/export", () => {
     expect(agentRef).toMatchObject({ from: "link", provider: "slack", key: "access_token" });
     expect(agentRef).not.toHaveProperty("id");
   });
+
+  test("strips workspace_config[*].value while preserving description and schema", async () => {
+    const config = {
+      atlas: null,
+      workspace: {
+        version: "1.0",
+        workspace: { id: "ws-test-id", name: "Test Workspace" },
+        workspace_config: {
+          email_recipient: {
+            description: "Where digest emails go",
+            schema: { type: "string", format: "email" },
+            value: "alice@example.com",
+          },
+          tone: {
+            description: "House voice",
+            value: "casual",
+          },
+          unset_key: {
+            schema: { type: "string" },
+          },
+        },
+      },
+    };
+    const { app } = createExportTestApp({ config });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/export");
+
+    expect(response.status).toBe(200);
+    const yaml = await response.text();
+    const parsed = parse(yaml) as Record<string, unknown>;
+    const wc = parsed.workspace_config as Record<string, Record<string, unknown>>;
+
+    assert(wc, "expected workspace_config block in export");
+    expect(wc.email_recipient).not.toHaveProperty("value");
+    expect(wc.email_recipient).toEqual({
+      description: "Where digest emails go",
+      schema: { type: "string", format: "email" },
+    });
+    expect(wc.tone).not.toHaveProperty("value");
+    expect(wc.tone).toEqual({ description: "House voice" });
+    expect(wc.unset_key).toEqual({ schema: { type: "string" } });
+  });
+
+  test("omits workspace_config block when absent from config", async () => {
+    const config = {
+      atlas: null,
+      workspace: { version: "1.0", workspace: { id: "ws-test-id", name: "Test Workspace" } },
+    };
+    const { app } = createExportTestApp({ config });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/export");
+
+    expect(response.status).toBe(200);
+    const yaml = await response.text();
+    const parsed = parse(yaml) as Record<string, unknown>;
+    expect(parsed).not.toHaveProperty("workspace_config");
+  });
 });

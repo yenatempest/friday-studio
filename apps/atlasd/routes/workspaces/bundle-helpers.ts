@@ -5,7 +5,7 @@
 import { mkdir, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { exportBundle } from "@atlas/bundle";
-import type { WorkspaceConfig } from "@atlas/config";
+import type { WorkspaceConfig, WorkspaceConfigEntry } from "@atlas/config";
 import {
   type CredentialUsage,
   extractCredentials,
@@ -81,7 +81,12 @@ export async function buildWorkspaceBundleBytes(
   }
   const portableConfig = toProviderRefs(workspaceToExport, providerMap);
   const { id: _id, ...workspaceIdentity } = portableConfig.workspace;
-  const exportConfig = { ...portableConfig, workspace: workspaceIdentity };
+  const scrubbedWorkspaceConfig = scrubWorkspaceConfigValues(portableConfig.workspace_config);
+  const exportConfig = {
+    ...portableConfig,
+    workspace: workspaceIdentity,
+    ...(scrubbedWorkspaceConfig ? { workspace_config: scrubbedWorkspaceConfig } : {}),
+  };
   const workspaceYml = stringify(exportConfig, { indent: 2, lineWidth: 100 });
 
   const name = portableConfig.workspace.name ?? input.workspaceName;
@@ -96,6 +101,24 @@ export async function buildWorkspaceBundleBytes(
   });
 
   return { bundleBytes, name, version };
+}
+
+/**
+ * Returns a copy of `workspace_config` with every entry's `value` cleared,
+ * leaving `description` and `schema` intact. Recipients see the declarations
+ * and run setup themselves. Returns `undefined` if the input was absent so
+ * the caller can omit the block from the exported YAML entirely.
+ */
+export function scrubWorkspaceConfigValues(
+  workspaceConfig: Record<string, WorkspaceConfigEntry> | undefined,
+): Record<string, WorkspaceConfigEntry> | undefined {
+  if (!workspaceConfig) return undefined;
+  const scrubbed: Record<string, WorkspaceConfigEntry> = {};
+  for (const [key, entry] of Object.entries(workspaceConfig)) {
+    const { value: _value, ...rest } = entry;
+    scrubbed[key] = rest;
+  }
+  return scrubbed;
 }
 
 /**

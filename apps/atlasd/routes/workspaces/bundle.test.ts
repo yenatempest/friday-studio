@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStubPlatformModels } from "@atlas/llm";
 import type { WorkspaceManager } from "@atlas/workspace";
+import { parse as parseYaml } from "@std/yaml";
 import { Hono } from "hono";
 import JSZip from "jszip";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -44,6 +45,7 @@ function createApp(opts: {
   workspaceId?: string;
   homeDir: string;
   registeredWorkspace?: { id: string; name: string; path: string };
+  workspaceConfigBlock?: Record<string, Record<string, unknown>>;
 }): { app: Hono<AppVariables>; registerSpy: ReturnType<typeof vi.fn> } {
   const workspaceId = opts.workspaceId ?? "ws-demo";
   const registerSpy = vi
@@ -57,6 +59,14 @@ function createApp(opts: {
       },
       created: true,
     }));
+
+  const workspaceConfig: Record<string, unknown> = {
+    version: "1.0",
+    workspace: { name: "demo-space" },
+  };
+  if (opts.workspaceConfigBlock) {
+    workspaceConfig.workspace_config = opts.workspaceConfigBlock;
+  }
 
   const mockManager = {
     find: vi
@@ -73,10 +83,7 @@ function createApp(opts: {
       }),
     getWorkspaceConfig: vi
       .fn()
-      .mockResolvedValue({
-        atlas: null,
-        workspace: { version: "1.0", workspace: { name: "demo-space" } },
-      }),
+      .mockResolvedValue({ atlas: null, workspace: workspaceConfig }),
     registerWorkspace: registerSpy,
     list: vi.fn().mockResolvedValue([]),
     deleteWorkspace: vi.fn(),
@@ -204,5 +211,41 @@ describe("workspace bundle endpoints (end-to-end)", () => {
     expect(response.status).toBe(500);
     const body = (await response.json()) as { error: string };
     expect(body.error).toMatch(/integrity check failed/);
+  });
+
+  test("bundle export scrubs workspace_config values while preserving description and schema", async () => {
+    const { app } = createApp({
+      workspaceDir,
+      homeDir,
+      workspaceConfigBlock: {
+        email_recipient: {
+          description: "Where digest emails go",
+          schema: { type: "string", format: "email" },
+          value: "alice@example.com",
+        },
+        tone: { description: "House voice", value: "casual" },
+      },
+    });
+
+    const response = await app.request("/ws-demo/bundle");
+    expect(response.status).toBe(200);
+
+    const zipBytes = new Uint8Array(await response.arrayBuffer());
+    const zip = await JSZip.loadAsync(zipBytes);
+    const yml = await zip.file("workspace.yml")?.async("string");
+    expect(yml).toBeTruthy();
+    const parsed = parseYaml(yml ?? "") as Record<string, unknown>;
+    const wc = parsed.workspace_config as Record<string, Record<string, unknown>>;
+
+    expect(wc.email_recipient).toEqual({
+      description: "Where digest emails go",
+      schema: { type: "string", format: "email" },
+    });
+    expect(wc.email_recipient).not.toHaveProperty("value");
+    expect(wc.tone).toEqual({ description: "House voice" });
+    expect(wc.tone).not.toHaveProperty("value");
+    // Original values must not leak into the bundled YAML in any form.
+    expect(yml).not.toContain("alice@example.com");
+    expect(yml).not.toContain("casual");
   });
 });
