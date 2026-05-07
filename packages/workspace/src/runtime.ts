@@ -127,7 +127,11 @@ import { assertGlobalWriteAllowed, isGlobalWriteAttempt } from "./global-scope-g
 import { MountSourceNotFoundError } from "./mount-errors.ts";
 import { mountRegistry } from "./mount-registry.ts";
 import { MountedStoreBinding } from "./mounted-store-binding.ts";
-import { interpolateConfig, resolveWorkspaceVariables } from "./variable-interpolation.ts";
+import {
+  buildWorkspaceConfigBag,
+  interpolateConfig,
+  resolveWorkspaceVariables,
+} from "./variable-interpolation.ts";
 
 /**
  * Await a promise but reject as soon as `signal` aborts, even when the
@@ -1321,9 +1325,16 @@ export class WorkspaceRuntime {
       this.options.daemonUrl,
     );
     if (wsVars) {
-      this.config = { ...this.config, workspace: interpolateConfig(this.config.workspace, wsVars) };
+      const configBag = buildWorkspaceConfigBag(this.config.workspace);
+      this.config = {
+        ...this.config,
+        workspace: interpolateConfig(this.config.workspace, wsVars, configBag),
+      };
       if (this.config.atlas) {
-        this.config = { ...this.config, atlas: interpolateConfig(this.config.atlas, wsVars) };
+        this.config = {
+          ...this.config,
+          atlas: interpolateConfig(this.config.atlas, wsVars, configBag),
+        };
       }
     }
 

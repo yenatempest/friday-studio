@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  buildWorkspaceConfigBag,
   findRepoRoot,
   interpolateConfig,
   resolveWorkspaceVariables,
@@ -188,5 +189,103 @@ describe("resolveWorkspaceVariables", () => {
     expect(result.agents.coder.config.apiUrl).toBe("http://localhost:8080/api");
     expect(result.functions.prepare.code).toContain(`var root = "${tempDir}"`);
     expect(result.functions.prepare.code).toContain('fetch("http://localhost:8080/signal")');
+  });
+});
+
+describe("interpolateConfig with workspace_config bag", () => {
+  it("substitutes {{workspace_config.foo}} when bag has the key", () => {
+    const result = interpolateConfig("Send to {{workspace_config.email}}", VARS, {
+      email: "alice@example.com",
+    });
+    expect(result).toBe("Send to alice@example.com");
+  });
+
+  it("leaves {{workspace_config.foo}} literal when bag is missing or empty", () => {
+    expect(interpolateConfig("hi {{workspace_config.x}}", VARS)).toBe("hi {{workspace_config.x}}");
+    expect(interpolateConfig("hi {{workspace_config.x}}", VARS, {})).toBe(
+      "hi {{workspace_config.x}}",
+    );
+  });
+
+  it("substitutes empty string as empty string", () => {
+    const result = interpolateConfig("[{{workspace_config.note}}]", VARS, { note: "" });
+    expect(result).toBe("[]");
+  });
+
+  it("does not interfere with flat {{repo_root}} resolution", () => {
+    const result = interpolateConfig(
+      "{{repo_root}} | {{workspace_config.email}}",
+      VARS,
+      { email: "alice@example.com" },
+    );
+    expect(result).toBe("/home/user/code/atlas | alice@example.com");
+  });
+
+  it("leaves unrelated dotted placeholder literal (different namespace)", () => {
+    const result = interpolateConfig("{{config.x}}/end", VARS, { x: "ignored" });
+    expect(result).toBe("{{config.x}}/end");
+  });
+
+  it("does not mutate the input config object", () => {
+    const input = {
+      agents: { a: { prompt: "{{workspace_config.email}}" } },
+      list: ["{{repo_root}}"],
+    };
+    const snapshot = JSON.parse(JSON.stringify(input));
+    interpolateConfig(input, VARS, { email: "alice@example.com" });
+    expect(input).toEqual(snapshot);
+  });
+});
+
+describe("buildWorkspaceConfigBag", () => {
+  it("returns an empty bag when workspace_config is missing", () => {
+    expect(buildWorkspaceConfigBag({})).toEqual({});
+  });
+
+  it("returns an empty bag when workspace_config is empty", () => {
+    expect(buildWorkspaceConfigBag({ workspace_config: {} })).toEqual({});
+  });
+
+  it("excludes entries with no value field (unfilled)", () => {
+    const bag = buildWorkspaceConfigBag({
+      workspace_config: { email: { /* no value */ } },
+    });
+    expect(bag).toEqual({});
+  });
+
+  it("excludes entries with value: null (unfilled)", () => {
+    const bag = buildWorkspaceConfigBag({
+      workspace_config: { email: { value: null } },
+    });
+    expect(bag).toEqual({});
+  });
+
+  it("includes empty string (filled)", () => {
+    const bag = buildWorkspaceConfigBag({
+      workspace_config: { note: { value: "" } },
+    });
+    expect(bag).toEqual({ note: "" });
+  });
+
+  it("coerces numbers and booleans via String()", () => {
+    const bag = buildWorkspaceConfigBag({
+      workspace_config: {
+        count: { value: 42 },
+        zero: { value: 0 },
+        flag: { value: true },
+        falsy: { value: false },
+      },
+    });
+    expect(bag).toEqual({ count: "42", zero: "0", flag: "true", falsy: "false" });
+  });
+
+  it("coerces objects and arrays via JSON.stringify", () => {
+    const bag = buildWorkspaceConfigBag({
+      workspace_config: {
+        list: { value: [1, 2, 3] },
+        obj: { value: { a: 1 } },
+      },
+    });
+    expect(bag).toEqual({ list: "[1,2,3]", obj: '{"a":1}' });
   });
 });

@@ -28,40 +28,70 @@ export const WorkspaceVariablesSchema = z.object({
 
 export type WorkspaceVariables = z.infer<typeof WorkspaceVariablesSchema>;
 
-/** Pattern matching `{{key}}` — captures the key name. */
-const PLACEHOLDER_RE = /\{\{([a-z_]+)\}\}/g;
+/**
+ * Pattern matching `{{key}}` or `{{ns.subkey}}` — captures the (possibly dotted)
+ * key name. One level of dotted nesting is supported, scoped to the
+ * `workspace_config.<key>` namespace produced by `buildWorkspaceConfigBag`.
+ */
+const PLACEHOLDER_RE = /\{\{([a-z_]+(?:\.[a-z_]+)?)\}\}/g;
+
+const WORKSPACE_CONFIG_PREFIX = "workspace_config.";
 
 /**
- * Recursively walk a parsed config object and replace `{{key}}` placeholders
- * in every string value with the corresponding entry from `variables`.
+ * Per-entry filled values from `workspace.yml`'s `workspace_config:` block,
+ * coerced to string. Keys are bare config keys (no `workspace_config.` prefix).
+ * Built by `buildWorkspaceConfigBag` from the parsed config.
+ */
+export type WorkspaceConfigBag = Record<string, string>;
+
+/**
+ * Recursively walk a parsed config object and replace `{{key}}` and
+ * `{{workspace_config.<key>}}` placeholders in every string value.
  *
  * - Non-string values (numbers, booleans, null) are returned as-is.
- * - Unknown `{{unknown_key}}` placeholders are left untouched (a warning is logged).
+ * - Unknown placeholders are left untouched (a warning is logged).
  * - The function is pure modulo logging — it returns a new object tree.
  */
-export function interpolateConfig<T>(value: T, variables: WorkspaceVariables): T {
+export function interpolateConfig<T>(
+  value: T,
+  variables: WorkspaceVariables,
+  configBag?: WorkspaceConfigBag,
+): T {
   if (typeof value === "string") {
-    return interpolateString(value, variables) as T;
+    return interpolateString(value, variables, configBag) as T;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => interpolateConfig(item, variables)) as T;
+    return value.map((item) => interpolateConfig(item, variables, configBag)) as T;
   }
   if (value !== null && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      result[k] = interpolateConfig(v, variables);
+      result[k] = interpolateConfig(v, variables, configBag);
     }
     return result as T;
   }
   return value;
 }
 
-/**
- * Replace `{{key}}` tokens in a single string.
- */
-function interpolateString(str: string, variables: WorkspaceVariables): string {
+function interpolateString(
+  str: string,
+  variables: WorkspaceVariables,
+  configBag: WorkspaceConfigBag | undefined,
+): string {
   const knownKeys = new Set(Object.keys(variables));
   return str.replace(PLACEHOLDER_RE, (match, key: string) => {
+    if (key.startsWith(WORKSPACE_CONFIG_PREFIX)) {
+      const subKey = key.slice(WORKSPACE_CONFIG_PREFIX.length);
+      const resolved = configBag?.[subKey];
+      if (resolved !== undefined) {
+        return resolved;
+      }
+      logger.warn("Unfilled workspace_config placeholder, leaving as-is", {
+        placeholder: match,
+        key: subKey,
+      });
+      return match;
+    }
     if (knownKeys.has(key)) {
       return variables[key as keyof WorkspaceVariables];
     }
@@ -71,6 +101,32 @@ function interpolateString(str: string, variables: WorkspaceVariables): string {
     });
     return match;
   });
+}
+
+function coerceConfigValue(value: unknown): string {
+  if (typeof value === "object" && value !== null) {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+/**
+ * Build the `workspace_config` namespace bag from a parsed `WorkspaceConfig`.
+ * Includes only entries whose `value` is non-null and non-undefined — unfilled
+ * entries stay literal at substitution time so the existing warning fires
+ * and the setup gate keeps the workspace from running.
+ */
+export function buildWorkspaceConfigBag(parsed: {
+  workspace_config?: Record<string, { value?: unknown } | undefined>;
+}): WorkspaceConfigBag {
+  const entries = parsed.workspace_config ?? {};
+  const bag: WorkspaceConfigBag = {};
+  for (const [key, entry] of Object.entries(entries)) {
+    if (entry && entry.value !== undefined && entry.value !== null) {
+      bag[key] = coerceConfigValue(entry.value);
+    }
+  }
+  return bag;
 }
 
 /**
