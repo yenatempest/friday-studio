@@ -1,29 +1,36 @@
 <!--
-  Workspace setup page — fills in declared `workspace_config` values.
+  Workspace setup page — fills in declared `workspace_config` values and pins
+  per-workspace credential choices for any provider-only link refs that have
+  no Link default.
 
   Two modes share one form:
-  - Setup (`requires_setup === true`): renders the unfilled keys from the
-    daemon's `setup_requirements.configKeys`. Submit label "Finish setup".
+  - Setup (`requires_setup === true`): renders the unfilled config keys from
+    `setup_requirements.configKeys` and one block per
+    `setup_requirements.credentials[]` entry. Submit label "Finish setup".
   - Edit (`requires_setup === false`): renders every declared
     `workspace_config[*]` entry, prefilled from each entry's existing
-    `value`. Submit label "Save changes". The setup page doubles as the
-    editor (design § 8); there is no separate edit UI.
+    `value`. Credential blocks only appear when the provider still has no
+    default (i.e. the entry is genuinely a Requirement). Submit label
+    "Save changes". The setup page doubles as the editor (design § 8); there
+    is no separate edit UI.
 
-  Both modes POST to `/:workspaceId/setup` with the same payload shape and
-  navigate to `/platform/{workspaceId}` on success.
-
-  Config Requirements only — Credential Requirements come in task #18.
+  Both modes POST to `/:workspaceId/setup` with the same payload shape
+  (`workspaceConfigValues` + `credentialChoices`) and navigate to
+  `/platform/{workspaceId}` on success.
 
   @component
 -->
 
 <script lang="ts">
   import { Button } from "@atlas/ui";
+  import { browser } from "$app/environment";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { getDaemonClient } from "$lib/daemon-client";
   import { workspaceQueries } from "$lib/queries";
+  import { useCredentialConnect } from "$lib/use-credential-connect.svelte.ts";
+  import CredentialSecretForm from "$lib/components/credential-secret-form.svelte";
   import { z } from "zod";
 
   const client = getDaemonClient();
@@ -47,6 +54,77 @@
   const ConfigBlockSchema = z
     .object({
       workspace_config: z.record(z.string(), WorkspaceConfigEntrySchema).optional(),
+    })
+    .passthrough();
+
+  /**
+   * Schemas for `setup_requirements.credentials[]`. The Hono RPC response is
+   * narrowed by Zod here because `workspace-queries.ts:config()` strips
+   * unknown fields by default — see `docs/learnings/2026-05-07-workspace-setup.md`
+   * (frontend gotcha: typed client + Zod stripping).
+   */
+  const CredentialOptionSchema = z.object({
+    id: z.string(),
+    label: z.string(),
+    displayName: z.string().nullable(),
+    userIdentifier: z.string().nullable(),
+    isDefault: z.boolean(),
+  });
+  const CredentialRequirementSchema = z.object({
+    provider: z.string(),
+    label: z.string().optional(),
+    options: z.array(CredentialOptionSchema),
+  });
+  const SetupRequirementsSchema = z
+    .object({
+      configKeys: z
+        .array(
+          z.object({
+            key: z.string(),
+            description: z.string().optional(),
+          }),
+        )
+        .optional(),
+      credentials: z.array(CredentialRequirementSchema).optional(),
+    })
+    .optional();
+
+  type CredentialOption = z.infer<typeof CredentialOptionSchema>;
+  type CredentialRequirement = z.infer<typeof CredentialRequirementSchema>;
+
+  /**
+   * Schema for the parsed config's link refs. Used to walk the YAML and build
+   * a `provider → path[]` map so per-provider blocks know which ref paths
+   * (`mcp:<serverId>:<envVar>` / `agent:<agentId>:<envVar>`) they bind.
+   */
+  const LinkRefSchema = z
+    .object({
+      from: z.literal("link"),
+      provider: z.string().optional(),
+      id: z.string().optional(),
+    })
+    .passthrough();
+  const ServerEnvSchema = z.record(z.string(), z.unknown());
+  const McpServerSchema = z
+    .object({ env: ServerEnvSchema.optional() })
+    .passthrough();
+  const AtlasAgentSchema = z
+    .object({ type: z.literal("atlas"), env: ServerEnvSchema.optional() })
+    .passthrough();
+  const RefWalkSchema = z
+    .object({
+      tools: z
+        .object({
+          mcp: z
+            .object({
+              servers: z.record(z.string(), McpServerSchema).optional(),
+            })
+            .passthrough()
+            .optional(),
+        })
+        .passthrough()
+        .optional(),
+      agents: z.record(z.string(), z.unknown()).optional(),
     })
     .passthrough();
 
@@ -91,9 +169,104 @@
     return out;
   });
 
-  let values = $state<Record<string, string>>({});
+  /**
+   * Credential Requirements parsed off the daemon response. Empty array when
+   * the response carries no `credentials` block (config-only setup, or
+   * everything resolved to a default).
+   */
+  const credentialRequirements = $derived.by((): CredentialRequirement[] => {
+    const data = configQuery.data;
+    if (!data || !("setup_requirements" in data)) return [];
+    const parsed = SetupRequirementsSchema.safeParse(data.setup_requirements);
+    if (!parsed.success || !parsed.data) return [];
+    return parsed.data.credentials ?? [];
+  });
 
-  // Seed inputs for any newly-seen key. Setup mode seeds empty strings;
+  /**
+   * `provider → ref paths[]` derived by walking the parsed config for
+   * `from: link` env entries. Mirrors `extractCredentials` server-side. Only
+   * paths that lack an `id` (i.e. provider-only refs that the setup endpoint
+   * will demand a `credentialChoices` entry for) are emitted.
+   */
+  const pathsByProvider = $derived.by((): Map<string, string[]> => {
+    const map = new Map<string, string[]>();
+    const parsed = RefWalkSchema.safeParse(configQuery.data?.config);
+    if (!parsed.success) return map;
+
+    const push = (provider: string, path: string) => {
+      const existing = map.get(provider);
+      if (existing) existing.push(path);
+      else map.set(provider, [path]);
+    };
+
+    const servers = parsed.data.tools?.mcp?.servers ?? {};
+    for (const [serverId, server] of Object.entries(servers)) {
+      const env = server.env ?? {};
+      for (const [envVar, raw] of Object.entries(env)) {
+        const ref = LinkRefSchema.safeParse(raw);
+        if (!ref.success) continue;
+        if (ref.data.id) continue;
+        if (!ref.data.provider) continue;
+        push(ref.data.provider, `mcp:${serverId}:${envVar}`);
+      }
+    }
+
+    const agents = parsed.data.agents ?? {};
+    for (const [agentId, rawAgent] of Object.entries(agents)) {
+      const agent = AtlasAgentSchema.safeParse(rawAgent);
+      if (!agent.success) continue;
+      const env = agent.data.env ?? {};
+      for (const [envVar, raw] of Object.entries(env)) {
+        const ref = LinkRefSchema.safeParse(raw);
+        if (!ref.success) continue;
+        if (ref.data.id) continue;
+        if (!ref.data.provider) continue;
+        push(ref.data.provider, `agent:${agentId}:${envVar}`);
+      }
+    }
+    return map;
+  });
+
+  /** Flat list of every credential ref path that needs a selection. */
+  const credentialPaths = $derived.by((): string[] => {
+    const out: string[] = [];
+    for (const req of credentialRequirements) {
+      const paths = pathsByProvider.get(req.provider) ?? [];
+      for (const p of paths) out.push(p);
+    }
+    return out;
+  });
+
+  let values = $state<Record<string, string>>({});
+  let credentialChoices = $state<Record<string, string>>({});
+
+  /**
+   * Per-provider details fetched from Link's `/v1/providers/:id` so the
+   * "Connect another account" affordance dispatches to the right flow
+   * (oauth popup, app-install popup, or inline API-key form).
+   */
+  type ProviderType = "oauth" | "apikey" | "app_install";
+  type ProviderDetails = {
+    id: string;
+    type: ProviderType;
+    displayName: string;
+    secretSchema?: { properties?: Record<string, unknown>; required?: string[] };
+  };
+  const ProviderResponseSchema = z.object({
+    id: z.string(),
+    type: z.enum(["oauth", "apikey", "app_install"]),
+    displayName: z.string(),
+    secretSchema: z
+      .object({
+        properties: z.record(z.string(), z.unknown()).optional(),
+        required: z.array(z.string()).optional(),
+      })
+      .optional(),
+  });
+  let providerDetails = $state<Record<string, ProviderDetails | null>>({});
+  let apiKeyExpanded = $state<Record<string, boolean>>({});
+
+  // Seed config inputs for any newly-seen key. Setup mode seeds empty strings;
   // edit mode seeds from each entry's existing `value`. Preserves any
   // user input already typed for previously-seen keys.
   $effect(() => {
@@ -102,21 +275,129 @@
     }
   });
 
-  const allFilled = $derived(
-    configKeys.length > 0 && configKeys.every((entry) => values[entry.key]?.trim().length > 0),
+  // Preselect credential choices: every path bound to a single-option
+  // requirement gets that option's id. Any user-made selection wins on
+  // subsequent renders (we never overwrite a path that already has a value).
+  $effect(() => {
+    for (const req of credentialRequirements) {
+      const paths = pathsByProvider.get(req.provider) ?? [];
+      if (req.options.length === 1) {
+        const onlyId = req.options[0].id;
+        for (const p of paths) {
+          if (!(p in credentialChoices)) credentialChoices[p] = onlyId;
+        }
+      }
+    }
+  });
+
+  /**
+   * One `useCredentialConnect` instance per provider, kept stable across
+   * renders so popup-blocked / submitting state survives. Built lazily as
+   * providers appear.
+   */
+  const connectByProvider = new Map<string, ReturnType<typeof useCredentialConnect>>();
+  function getConnect(provider: string) {
+    let connect = connectByProvider.get(provider);
+    if (!connect) {
+      connect = useCredentialConnect(provider);
+      connectByProvider.set(provider, connect);
+    }
+    return connect;
+  }
+
+  /**
+   * Wire callback listeners for every provider with an active block. On
+   * successful connect, invalidate the workspace config query so the option
+   * list re-fetches with the freshly-created credential, and pre-select the
+   * new id for every path bound to that provider so the user can submit
+   * without an extra click.
+   */
+  $effect(() => {
+    if (!browser) return;
+    const cleanups: Array<() => void> = [];
+    for (const req of credentialRequirements) {
+      const connect = getConnect(req.provider);
+      const cleanup = connect.listenForCallback((message) => {
+        const paths = pathsByProvider.get(req.provider) ?? [];
+        for (const p of paths) credentialChoices[p] = message.credentialId;
+        if (workspaceId) {
+          void queryClient.invalidateQueries({
+            queryKey: workspaceQueries.config(workspaceId).queryKey,
+          });
+        }
+      });
+      cleanups.push(cleanup);
+    }
+    return () => {
+      for (const c of cleanups) c();
+    };
+  });
+
+  // Fetch provider details on demand (one call per provider). Triggers when a
+  // new credential block appears. Failures collapse to `null` so the block
+  // falls back to the OAuth flow — better than blocking the page on a fetch.
+  $effect(() => {
+    if (!browser) return;
+    for (const req of credentialRequirements) {
+      const provider = req.provider;
+      if (provider in providerDetails) continue;
+      providerDetails[provider] = null;
+      void fetch(`/api/daemon/api/link/v1/providers/${encodeURIComponent(provider)}`)
+        .then(async (res) => {
+          if (!res.ok) return;
+          const parsed = ProviderResponseSchema.safeParse(await res.json());
+          if (!parsed.success) return;
+          providerDetails[provider] = parsed.data;
+        })
+        .catch(() => {
+          // Swallow — block falls back to OAuth.
+        });
+    }
+  });
+
+  async function handleApiKeySubmit(
+    provider: string,
+    label: string,
+    secret: Record<string, string>,
+  ) {
+    const connect = getConnect(provider);
+    const newId = await connect.submitApiKey(label, secret);
+    if (!newId) return;
+    const paths = pathsByProvider.get(provider) ?? [];
+    for (const p of paths) credentialChoices[p] = newId;
+    apiKeyExpanded[provider] = false;
+    if (workspaceId) {
+      await queryClient.invalidateQueries({
+        queryKey: workspaceQueries.config(workspaceId).queryKey,
+      });
+    }
+  }
+
+  const allConfigFilled = $derived(
+    configKeys.every((entry) => values[entry.key]?.trim().length > 0),
+  );
+  const allCredentialsChosen = $derived(
+    credentialPaths.every((path) => (credentialChoices[path] ?? "").length > 0),
+  );
+  const formReady = $derived(
+    (configKeys.length > 0 || credentialPaths.length > 0) &&
+      allConfigFilled &&
+      allCredentialsChosen,
   );
 
   let submitting = $state(false);
   let errorMessage = $state<string | null>(null);
 
   /**
-   * Setup endpoint error shape: `{ success: false, error, message?, missingKeys? }`.
-   * `safeParse` so a malformed payload renders a generic message rather than crashing.
+   * Setup endpoint error shape: `{ success: false, error, message?, missingKeys?,
+   * missingCredentialPaths? }`. `safeParse` so a malformed payload renders a
+   * generic message rather than crashing.
    */
   const SetupErrorSchema = z.object({
     error: z.string(),
     message: z.string().optional(),
     missingKeys: z.array(z.string()).optional(),
+    missingCredentialPaths: z.array(z.string()).optional(),
   });
 
   async function formatSetupError(res: Response): Promise<string> {
@@ -125,9 +406,12 @@
       const parsed: unknown = JSON.parse(raw);
       const result = SetupErrorSchema.safeParse(parsed);
       if (result.success) {
-        const { message, missingKeys } = result.data;
+        const { message, missingKeys, missingCredentialPaths } = result.data;
         if (missingKeys && missingKeys.length > 0) {
           return `Missing values: ${missingKeys.join(", ")}`;
+        }
+        if (missingCredentialPaths && missingCredentialPaths.length > 0) {
+          return `Missing credential pins: ${missingCredentialPaths.join(", ")}`;
         }
         return message ?? result.data.error;
       }
@@ -138,14 +422,17 @@
   }
 
   async function submit() {
-    if (!workspaceId || !allFilled || submitting) return;
+    if (!workspaceId || !formReady || submitting) return;
     submitting = true;
     errorMessage = null;
 
     try {
       const res = await client.workspace[":workspaceId"].setup.$post({
         param: { workspaceId },
-        json: { workspaceConfigValues: values },
+        json: {
+          workspaceConfigValues: values,
+          credentialChoices,
+        },
       });
 
       if (!res.ok) {
@@ -161,6 +448,10 @@
       submitting = false;
     }
   }
+
+  function optionLabel(option: CredentialOption): string {
+    return option.displayName ?? option.userIdentifier ?? option.label;
+  }
 </script>
 
 <div class="setup-page">
@@ -170,10 +461,10 @@
     <p class="state-msg">Loading workspace…</p>
   {:else if configQuery.isError}
     <p class="state-msg">Failed to load workspace: {configQuery.error?.message}</p>
-  {:else if configKeys.length === 0}
+  {:else if configKeys.length === 0 && credentialRequirements.length === 0}
     <div class="complete">
       <h1>Nothing to configure</h1>
-      <p>This workspace has no declared <code>workspace_config</code> keys.</p>
+      <p>This workspace has no declared <code>workspace_config</code> keys or unresolved credentials.</p>
       <Button variant="primary" href="/platform/{workspaceId}">Open workspace</Button>
     </div>
   {:else}
@@ -209,12 +500,98 @@
         </label>
       {/each}
 
+      {#each credentialRequirements as req (req.provider)}
+        {@const connect = getConnect(req.provider)}
+        {@const paths = pathsByProvider.get(req.provider) ?? []}
+        {@const groupName = `cred-${req.provider}`}
+        {@const details = providerDetails[req.provider] ?? null}
+        <fieldset class="cred-block">
+          <legend class="cred-legend">{req.label ?? req.provider}</legend>
+          <p class="cred-helper">
+            Connecting persists immediately even if you don't finish setup.
+          </p>
+          {#if req.options.length > 0}
+            <div class="cred-options" role="radiogroup">
+              {#each req.options as option (option.id)}
+                <label class="cred-option" class:selected={paths[0] && credentialChoices[paths[0]] === option.id}>
+                  <input
+                    type="radio"
+                    name={groupName}
+                    value={option.id}
+                    checked={paths[0] ? credentialChoices[paths[0]] === option.id : false}
+                    onchange={() => {
+                      for (const p of paths) credentialChoices[p] = option.id;
+                    }}
+                    disabled={submitting}
+                  />
+                  <span class="cred-option-text">
+                    <span class="cred-option-name">{optionLabel(option)}</span>
+                    {#if option.userIdentifier && option.userIdentifier !== optionLabel(option)}
+                      <span class="cred-option-meta">{option.userIdentifier}</span>
+                    {/if}
+                    {#if option.isDefault}
+                      <span class="cred-option-default">default</span>
+                    {/if}
+                  </span>
+                </label>
+              {/each}
+            </div>
+          {:else}
+            <p class="cred-empty">No connected accounts for this provider yet.</p>
+          {/if}
+
+          {#if details?.type === "apikey"}
+            {#if apiKeyExpanded[req.provider]}
+              <CredentialSecretForm
+                secretSchema={details.secretSchema ?? {}}
+                submitting={connect.submitting}
+                error={connect.error}
+                onSubmit={(label, secret) => handleApiKeySubmit(req.provider, label, secret)}
+                onCancel={() => (apiKeyExpanded[req.provider] = false)}
+              />
+            {:else}
+              <div class="cred-actions">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="small"
+                  onclick={() => (apiKeyExpanded[req.provider] = true)}
+                  disabled={submitting}
+                >
+                  Connect another account
+                </Button>
+              </div>
+            {/if}
+          {:else}
+            <div class="cred-actions">
+              <Button
+                type="button"
+                variant="secondary"
+                size="small"
+                onclick={details?.type === "app_install" ? connect.startAppInstall : connect.startOAuth}
+                disabled={submitting}
+              >
+                Connect another account
+              </Button>
+              {#if connect.popupBlocked && connect.blockedUrl}
+                <a class="cred-fallback" href={connect.blockedUrl} target="_blank" rel="noreferrer">
+                  Continue in this tab
+                </a>
+              {/if}
+            </div>
+          {/if}
+          {#if connect.error}
+            <p class="cred-error">{connect.error}</p>
+          {/if}
+        </fieldset>
+      {/each}
+
       {#if errorMessage}
         <p class="error">{errorMessage}</p>
       {/if}
 
       <div class="actions">
-        <Button type="submit" variant="primary" disabled={!allFilled || submitting}>
+        <Button type="submit" variant="primary" disabled={!formReady || submitting}>
           {submitting ? "Saving…" : requiresSetup ? "Finish setup" : "Save changes"}
         </Button>
       </div>
@@ -301,6 +678,113 @@
     &:disabled {
       opacity: 0.6;
     }
+  }
+
+  .cred-block {
+    background-color: var(--color-surface-1);
+    border: 1px solid var(--color-border-1);
+    border-radius: var(--radius-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-3);
+    margin: 0;
+    padding: var(--size-4);
+  }
+
+  .cred-legend {
+    color: var(--color-text);
+    font-family: var(--font-family-monospace);
+    font-size: var(--font-size-2);
+    font-weight: var(--font-weight-6);
+    padding: 0 var(--size-1);
+  }
+
+  .cred-helper {
+    color: color-mix(in srgb, var(--color-text), transparent 35%);
+    font-size: var(--font-size-2);
+    line-height: var(--font-lineheight-3);
+    margin: 0;
+  }
+
+  .cred-options {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-1-5);
+  }
+
+  .cred-option {
+    align-items: center;
+    background-color: var(--color-surface-2);
+    border: 1px solid var(--color-border-1);
+    border-radius: var(--radius-2);
+    cursor: pointer;
+    display: flex;
+    gap: var(--size-2);
+    padding: var(--size-2) var(--size-3);
+    transition: border-color 150ms ease, background-color 150ms ease;
+  }
+
+  .cred-option:hover {
+    border-color: color-mix(in srgb, var(--color-text), transparent 60%);
+  }
+
+  .cred-option.selected {
+    border-color: var(--color-text);
+  }
+
+  .cred-option input[type="radio"] {
+    flex-shrink: 0;
+  }
+
+  .cred-option-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .cred-option-name {
+    color: var(--color-text);
+    font-size: var(--font-size-2);
+  }
+
+  .cred-option-meta {
+    color: color-mix(in srgb, var(--color-text), transparent 35%);
+    font-family: var(--font-family-monospace);
+    font-size: var(--font-size-1);
+  }
+
+  .cred-option-default {
+    background-color: color-mix(in srgb, var(--color-accent), transparent 80%);
+    border-radius: var(--radius-1);
+    color: var(--color-accent);
+    font-size: var(--font-size-1);
+    margin-block-start: 2px;
+    padding: 0 var(--size-1);
+    width: fit-content;
+  }
+
+  .cred-empty {
+    color: color-mix(in srgb, var(--color-text), transparent 35%);
+    font-size: var(--font-size-2);
+    margin: 0;
+  }
+
+  .cred-actions {
+    align-items: center;
+    display: flex;
+    gap: var(--size-2);
+  }
+
+  .cred-fallback {
+    color: var(--color-accent);
+    font-size: var(--font-size-1);
+    text-decoration: underline;
+  }
+
+  .cred-error {
+    color: var(--color-error);
+    font-size: var(--font-size-2);
+    margin: 0;
   }
 
   .error {

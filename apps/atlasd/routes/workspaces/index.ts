@@ -1195,8 +1195,14 @@ const workspacesRoutes = daemonFactory
       if (!config) {
         return c.json({ error: `Failed to load workspace configuration: ${workspace.id}` }, 500);
       }
-      // Credential Requirements come via [TBD] — see task #18.
-      const setup = resolveConfigOnlySetupRequirements(config.workspace);
+      // Async helper so the setup page sees both Config and Credential
+      // Requirements. Per-workspace lookup — the list endpoint intentionally
+      // stays on the sync helper to avoid an N+1 against Link.
+      const userId = (await getCurrentUserId()) ?? "daemon";
+      const setup = await resolveWorkspaceSetupRequirements(
+        config.workspace,
+        buildSetupResolveDeps(userId),
+      );
       return c.json({
         config: config.workspace,
         type: workspace.metadata?.ephemeral ? "ephemeral" : "persistent",

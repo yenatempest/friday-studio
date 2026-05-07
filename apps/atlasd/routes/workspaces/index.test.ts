@@ -18,7 +18,10 @@ import {
   workspacesRoutes,
 } from "./index.ts";
 
-vi.mock("../me/adapter.ts", () => ({ getCurrentUser: vi.fn().mockResolvedValue({ ok: false }) }));
+vi.mock("../me/adapter.ts", () => ({
+  getCurrentUser: vi.fn().mockResolvedValue({ ok: false }),
+  getCurrentUserId: vi.fn().mockResolvedValue(undefined),
+}));
 
 function createTestApp() {
   const mockWorkspaceManager = {
