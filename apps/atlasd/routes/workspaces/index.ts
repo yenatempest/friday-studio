@@ -50,6 +50,7 @@ import { FilesystemWorkspaceCreationAdapter } from "@atlas/storage";
 import {
   resolveConfigOnlySetupRequirements,
   resolveWorkspaceSetupRequirements,
+  type SetupRequirements,
 } from "@atlas/workspace";
 import { ColorSchema, isErrnoException, stringifyError } from "@atlas/utils";
 import { getFridayHome } from "@atlas/utils/paths.server";
@@ -877,12 +878,19 @@ const workspacesRoutes = daemonFactory
 
       const ctx = c.get("app");
       const manager = ctx.getWorkspaceManager();
-      const imported: Array<{
+      // Per-bundle setup detection mirrors `/import-bundle`. User and Link
+      // deps are daemon-wide, so resolve once outside the loop.
+      const userId = (await getCurrentUserId()) ?? "daemon";
+      const setupDeps = buildSetupResolveDeps(userId);
+      type ImportedEntry = {
         workspaceId: string;
         name: string;
         path: string;
         memory?: { kind: string; path?: string; reason?: string };
-      }> = [];
+        setupRequired: boolean;
+        setup_requirements?: SetupRequirements;
+      };
+      const imported: ImportedEntry[] = [];
       const errors: Array<{ name: string; error: string }> = [...result.errors];
       for (const entry of result.imported) {
         try {
@@ -905,11 +913,32 @@ const workspacesRoutes = daemonFactory
             atlasHome,
             newWorkspaceId: registered.workspace.id,
           });
+          // Detection failure must not abort registration of this bundle or
+          // its siblings — the workspace is already on disk and registered.
+          // Default to `setupRequired: false` and surface the failure as a
+          // sibling-level error entry so the caller can investigate.
+          let setupRequired = false;
+          let setup_requirements: SetupRequirements | undefined;
+          try {
+            const setupStatus = await resolveWorkspaceSetupRequirements(
+              validation.config,
+              setupDeps,
+            );
+            setupRequired = setupStatus.requires_setup;
+            setup_requirements = setupStatus.setup_requirements;
+          } catch (err) {
+            errors.push({
+              name: entry.name,
+              error: `setup_detection_failed: ${stringifyError(err)}`,
+            });
+          }
           imported.push({
             workspaceId: registered.workspace.id,
             name: entry.name,
             path: entry.path,
             memory,
+            setupRequired,
+            ...(setup_requirements ? { setup_requirements } : {}),
           });
         } catch (err) {
           errors.push({ name: entry.name, error: stringifyError(err) });

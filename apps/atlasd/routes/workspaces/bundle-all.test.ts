@@ -12,13 +12,16 @@ import { workspacesRoutes } from "./index.ts";
 vi.mock("@atlas/storage", () => ({ FilesystemWorkspaceCreationAdapter: vi.fn() }));
 
 const mockFetchLinkCredential = vi.hoisted(() => vi.fn());
+const mockResolveCredentialsByProvider = vi.hoisted(() => vi.fn().mockResolvedValue([]));
 vi.mock("@atlas/core/mcp-registry/credential-resolver", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@atlas/core/mcp-registry/credential-resolver")>()),
   fetchLinkCredential: mockFetchLinkCredential,
+  resolveCredentialsByProvider: mockResolveCredentialsByProvider,
 }));
 
 vi.mock("../me/adapter.ts", () => ({
   getCurrentUser: vi.fn().mockResolvedValue({ id: "user-1", email: "test@test.com" }),
+  getCurrentUserId: vi.fn().mockResolvedValue("user-1"),
 }));
 
 const mockGetAtlasHome = vi.hoisted(() => vi.fn(() => "/tmp"));
@@ -37,6 +40,8 @@ interface FakeWorkspace {
   id: string;
   name: string;
   path: string;
+  /** Optional `workspace_config` block to surface via `getWorkspaceConfig` so the export route bundles it. */
+  workspaceConfig?: Record<string, Record<string, unknown>>;
 }
 
 function createAppMulti(opts: {
@@ -67,7 +72,12 @@ function createAppMulti(opts: {
     getWorkspaceConfig: vi.fn().mockImplementation(async (id: string) => {
       const w = byId.get(id);
       if (!w) return null;
-      return { atlas: null, workspace: { version: "1.0", workspace: { name: w.name } } };
+      const workspace: Record<string, unknown> = {
+        version: "1.0",
+        workspace: { name: w.name },
+      };
+      if (w.workspaceConfig) workspace.workspace_config = w.workspaceConfig;
+      return { atlas: null, workspace };
     }),
     registerWorkspace: registerSpy,
     list: vi
@@ -196,7 +206,7 @@ describe("bundle-all endpoints (end-to-end)", () => {
     expect(importResponse.status).toBe(200);
 
     const body = (await importResponse.json()) as {
-      imported: { workspaceId: string; name: string; path: string }[];
+      imported: { workspaceId: string; name: string; path: string; setupRequired: boolean }[];
       errors: { name: string; error: string }[];
       manifest: { entries: { name: string }[] };
     };
@@ -206,11 +216,62 @@ describe("bundle-all endpoints (end-to-end)", () => {
     expect(body.imported.map((e) => e.name).sort()).toEqual(["alpha", "beta"]);
     expect(body.imported.map((e) => e.workspaceId).sort()).toEqual(["imp-0", "imp-1"]);
     expect(body.manifest.entries.map((e) => e.name).sort()).toEqual(["alpha", "beta"]);
+    // Neither bundle declared a `workspace_config` block, so detection short-circuits.
+    expect(body.imported.every((e) => e.setupRequired === false)).toBe(true);
 
     // Two distinct dirs under homeDir/workspaces; each contains the expected agent file.
     const dirs = await readdir(join(homeDir, "workspaces"));
     expect(dirs).toHaveLength(2);
     expect(registerSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test("POST /import-bundle-all surfaces per-bundle setupRequired flags", async () => {
+    // Round-trip: alpha declares an unfilled `workspace_config` block (→ setupRequired: true);
+    // beta has no declarations (→ setupRequired: false).
+    const { app: exportApp } = createAppMulti({
+      workspaces: [
+        {
+          id: "a",
+          name: "alpha",
+          path: wsA,
+          workspaceConfig: { api_key: { description: "API key" } },
+        },
+        { id: "b", name: "beta", path: wsB },
+      ],
+      homeDir,
+    });
+    const exportResponse = await exportApp.request("/bundle-all");
+    const archiveBytes = new Uint8Array(await exportResponse.arrayBuffer());
+
+    const { app: importApp } = createAppMulti({
+      workspaces: [],
+      homeDir,
+      registeredId: (i) => `imp-${i}`,
+    });
+
+    const form = new FormData();
+    form.set("bundle", new File([archiveBytes], "full.zip", { type: "application/zip" }));
+    const importResponse = await importApp.request("/import-bundle-all", {
+      method: "POST",
+      body: form,
+    });
+    expect(importResponse.status).toBe(200);
+
+    const body = (await importResponse.json()) as {
+      imported: {
+        name: string;
+        setupRequired: boolean;
+        setup_requirements?: { configKeys?: { key: string }[] };
+      }[];
+      errors: { name: string; error: string }[];
+    };
+
+    expect(body.errors).toEqual([]);
+    const byName = Object.fromEntries(body.imported.map((e) => [e.name, e]));
+    expect(byName.alpha?.setupRequired).toBe(true);
+    expect(byName.alpha?.setup_requirements?.configKeys?.map((k) => k.key)).toEqual(["api_key"]);
+    expect(byName.beta?.setupRequired).toBe(false);
+    expect(byName.beta?.setup_requirements).toBeUndefined();
   });
 
   test("POST /import-bundle-all returns 400 when no bundle field present", async () => {
