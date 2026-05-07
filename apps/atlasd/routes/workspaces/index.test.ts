@@ -729,3 +729,246 @@ describe("injectBundledAgentRefs", () => {
     expect(result).toBe(config);
   });
 });
+
+// =============================================================================
+// setup_requirements payload on list / config endpoints
+// =============================================================================
+
+describe("setup_requirements payload on list / config endpoints", () => {
+  function createSetupTestApp(options: {
+    workspaces?: Array<Record<string, unknown>>;
+    findResult?: Record<string, unknown> | null;
+    configByWorkspaceId?: Record<string, Record<string, unknown> | null>;
+  }) {
+    const { workspaces = [], findResult = null, configByWorkspaceId = {} } = options;
+
+    const mockWorkspaceManager = {
+      find: vi.fn().mockResolvedValue(findResult),
+      list: vi.fn().mockResolvedValue(workspaces),
+      getWorkspaceConfig: vi.fn(async (id: string) => configByWorkspaceId[id] ?? null),
+      registerWorkspace: vi.fn(),
+      deleteWorkspace: vi.fn(),
+    } as unknown as WorkspaceManager;
+
+    const mockContext: AppContext = {
+      runtimes: new Map(),
+      startTime: Date.now(),
+      sseClients: new Map(),
+      sseStreams: new Map(),
+      getWorkspaceManager: () => mockWorkspaceManager,
+      getOrCreateWorkspaceRuntime: vi.fn(),
+      resetIdleTimeout: vi.fn(),
+      getWorkspaceRuntime: vi.fn(),
+      destroyWorkspaceRuntime: vi.fn(),
+      getAgentRegistry: vi.fn(),
+      getOrCreateChatSdkInstance: vi.fn(),
+      evictChatSdkInstance: vi.fn(),
+      daemon: {
+        getWorkspaceManager: () => mockWorkspaceManager,
+        runtimes: new Map(),
+      } as unknown as AppContext["daemon"],
+      streamRegistry: {} as AppContext["streamRegistry"],
+      chatTurnRegistry: {} as AppContext["chatTurnRegistry"],
+      sessionStreamRegistry: {} as AppContext["sessionStreamRegistry"],
+      sessionHistoryAdapter: {} as AppContext["sessionHistoryAdapter"],
+      exposeKernel: false,
+      platformModels: createStubPlatformModels(),
+    };
+
+    const app = new Hono<AppVariables>();
+    app.use("*", async (c, next) => {
+      c.set("app", mockContext);
+      await next();
+    });
+    app.route("/workspaces", workspacesRoutes);
+    return { app };
+  }
+
+  function makeWorkspace(id: string, name: string) {
+    return {
+      id,
+      name,
+      path: `/tmp/${id}`,
+      configPath: `/tmp/${id}/workspace.yml`,
+      status: "inactive",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastSeen: "2026-01-01T00:00:00.000Z",
+      metadata: {},
+    };
+  }
+
+  function configWithUnfilledKey(name: string) {
+    return {
+      workspace: {
+        version: "1.0",
+        workspace: { name },
+        workspace_config: {
+          email_recipient: { description: "Where to send alerts" },
+        },
+      },
+    };
+  }
+
+  function configWithFilledKey(name: string) {
+    return {
+      workspace: {
+        version: "1.0",
+        workspace: { name },
+        workspace_config: {
+          email_recipient: { description: "Where to send alerts", value: "alice@example.com" },
+        },
+      },
+    };
+  }
+
+  describe("GET /workspaces (list)", () => {
+    test("flags requires_setup: true with configKeys for an unfilled workspace", async () => {
+      const ws = makeWorkspace("ws-unfilled", "Unfilled");
+      const { app } = createSetupTestApp({
+        workspaces: [ws],
+        configByWorkspaceId: { "ws-unfilled": configWithUnfilledKey("Unfilled") },
+      });
+
+      const res = await app.request("/workspaces");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Array<Record<string, unknown>>;
+      expect(body).toHaveLength(1);
+      expect(body[0]).toMatchObject({
+        id: "ws-unfilled",
+        requires_setup: true,
+        setup_requirements: {
+          configKeys: [{ key: "email_recipient", description: "Where to send alerts" }],
+        },
+      });
+    });
+
+    test("flags requires_setup: false with no setup_requirements when fully filled", async () => {
+      const ws = makeWorkspace("ws-filled", "Filled");
+      const { app } = createSetupTestApp({
+        workspaces: [ws],
+        configByWorkspaceId: { "ws-filled": configWithFilledKey("Filled") },
+      });
+
+      const res = await app.request("/workspaces");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Array<Record<string, unknown>>;
+      expect(body[0]?.requires_setup).toBe(false);
+      expect(body[0]?.setup_requirements).toBeUndefined();
+    });
+
+    test("flags each workspace independently in a mixed list", async () => {
+      const filled = makeWorkspace("ws-a-filled", "Aaa");
+      const unfilled = makeWorkspace("ws-b-unfilled", "Bbb");
+      const { app } = createSetupTestApp({
+        workspaces: [filled, unfilled],
+        configByWorkspaceId: {
+          "ws-a-filled": configWithFilledKey("Aaa"),
+          "ws-b-unfilled": configWithUnfilledKey("Bbb"),
+        },
+      });
+
+      const res = await app.request("/workspaces");
+      const body = (await res.json()) as Array<Record<string, unknown>>;
+      const a = body.find((w) => w.id === "ws-a-filled");
+      const b = body.find((w) => w.id === "ws-b-unfilled");
+      expect(a?.requires_setup).toBe(false);
+      expect(a?.setup_requirements).toBeUndefined();
+      expect(b?.requires_setup).toBe(true);
+      expect(b?.setup_requirements).toMatchObject({
+        configKeys: [{ key: "email_recipient" }],
+      });
+    });
+
+    test("falls back to requires_setup: false when config is null (deleted/missing)", async () => {
+      const ws = makeWorkspace("ws-orphan", "Orphan");
+      const { app } = createSetupTestApp({
+        workspaces: [ws],
+        configByWorkspaceId: { "ws-orphan": null },
+      });
+
+      const res = await app.request("/workspaces");
+      const body = (await res.json()) as Array<Record<string, unknown>>;
+      expect(body[0]?.requires_setup).toBe(false);
+      expect(body[0]?.setup_requirements).toBeUndefined();
+    });
+
+    test("does not read legacy metadata.requires_setup", async () => {
+      // Workspace with stale metadata.requires_setup: true but a fully-filled
+      // config — derived state must override the stored value.
+      const ws = { ...makeWorkspace("ws-legacy", "Legacy"), metadata: { requires_setup: true } };
+      const { app } = createSetupTestApp({
+        workspaces: [ws],
+        configByWorkspaceId: { "ws-legacy": configWithFilledKey("Legacy") },
+      });
+
+      const res = await app.request("/workspaces");
+      const body = (await res.json()) as Array<Record<string, unknown>>;
+      expect(body[0]?.requires_setup).toBe(false);
+    });
+  });
+
+  describe("GET /workspaces/:workspaceId/config", () => {
+    test("returns requires_setup: true with setup_requirements for an unfilled config", async () => {
+      const ws = makeWorkspace("ws-1", "ws-1");
+      const { app } = createSetupTestApp({
+        findResult: ws,
+        configByWorkspaceId: { "ws-1": configWithUnfilledKey("ws-1") },
+      });
+
+      const res = await app.request("/workspaces/ws-1/config");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.requires_setup).toBe(true);
+      expect(body.setup_requirements).toMatchObject({
+        configKeys: [{ key: "email_recipient", description: "Where to send alerts" }],
+      });
+    });
+
+    test("returns requires_setup: false after Setup Completion fills the values", async () => {
+      const ws = makeWorkspace("ws-1", "ws-1");
+      const { app } = createSetupTestApp({
+        findResult: ws,
+        configByWorkspaceId: { "ws-1": configWithFilledKey("ws-1") },
+      });
+
+      const res = await app.request("/workspaces/ws-1/config");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.requires_setup).toBe(false);
+      expect(body.setup_requirements).toBeUndefined();
+    });
+  });
+
+  describe("GET /workspaces/:workspaceId (details)", () => {
+    test("returns requires_setup + setup_requirements alongside config", async () => {
+      const ws = makeWorkspace("ws-1", "ws-1");
+      const { app } = createSetupTestApp({
+        findResult: ws,
+        configByWorkspaceId: { "ws-1": configWithUnfilledKey("ws-1") },
+      });
+
+      const res = await app.request("/workspaces/ws-1");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.requires_setup).toBe(true);
+      expect(body.setup_requirements).toMatchObject({
+        configKeys: [{ key: "email_recipient" }],
+      });
+    });
+
+    test("returns requires_setup: false when config has no workspace_config block", async () => {
+      const ws = makeWorkspace("ws-plain", "ws-plain");
+      const { app } = createSetupTestApp({
+        findResult: ws,
+        configByWorkspaceId: {
+          "ws-plain": { workspace: { version: "1.0", workspace: { name: "ws-plain" } } },
+        },
+      });
+
+      const res = await app.request("/workspaces/ws-plain");
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.requires_setup).toBe(false);
+      expect(body.setup_requirements).toBeUndefined();
+    });
+  });
+});

@@ -325,13 +325,29 @@ const workspacesRoutes = daemonFactory
       const workspaces = ctx.exposeKernel
         ? allWorkspaces
         : allWorkspaces.filter((w) => w.id !== KERNEL_WORKSPACE_ID);
+      // Per-item setup state. getWorkspaceConfig is mtime-cached, so steady-state
+      // calls avoid re-parsing. Config-only — Credential Requirements come via
+      // the daemon-side resolver (see task #18).
+      const setupStatuses = await Promise.all(
+        workspaces.map(async (w) => {
+          const merged = await manager.getWorkspaceConfig(w.id);
+          return merged ? resolveConfigOnlySetupRequirements(merged.workspace) : null;
+        }),
+      );
       const response = workspaces
-        .map((w) => ({
-          ...w,
-          description: w.metadata?.description,
-          type: w.metadata?.ephemeral ? "ephemeral" : "persistent",
-          canonical: w.metadata?.canonical,
-        }))
+        .map((w, i) => {
+          const setup = setupStatuses[i];
+          return {
+            ...w,
+            description: w.metadata?.description,
+            type: w.metadata?.ephemeral ? "ephemeral" : "persistent",
+            canonical: w.metadata?.canonical,
+            requires_setup: setup?.requires_setup ?? false,
+            ...(setup?.setup_requirements
+              ? { setup_requirements: setup.setup_requirements }
+              : {}),
+          };
+        })
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
       return c.json(response);
     } catch (error) {
@@ -926,6 +942,7 @@ const workspacesRoutes = daemonFactory
 
       // Load workspace configuration
       const config = await manager.getWorkspaceConfig(workspace.id);
+      const setup = config ? resolveConfigOnlySetupRequirements(config.workspace) : null;
 
       return c.json(
         {
@@ -933,6 +950,10 @@ const workspacesRoutes = daemonFactory
           description: workspace.metadata?.description,
           type: workspace.metadata?.ephemeral ? "ephemeral" : "persistent",
           config: config?.workspace || null,
+          requires_setup: setup?.requires_setup ?? false,
+          ...(setup?.setup_requirements
+            ? { setup_requirements: setup.setup_requirements }
+            : {}),
         },
         200,
       );
@@ -1151,10 +1172,14 @@ const workspacesRoutes = daemonFactory
       if (!config) {
         return c.json({ error: `Failed to load workspace configuration: ${workspace.id}` }, 500);
       }
+      // Credential Requirements come via [TBD] — see task #18.
+      const setup = resolveConfigOnlySetupRequirements(config.workspace);
       return c.json({
         config: config.workspace,
         type: workspace.metadata?.ephemeral ? "ephemeral" : "persistent",
         expiresAt: workspace.metadata?.expiresAt,
+        requires_setup: setup.requires_setup,
+        ...(setup.setup_requirements ? { setup_requirements: setup.setup_requirements } : {}),
       });
     } catch (error) {
       const errorMessage = stringifyError(error);
