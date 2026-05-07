@@ -72,10 +72,7 @@ function createAppMulti(opts: {
     getWorkspaceConfig: vi.fn().mockImplementation(async (id: string) => {
       const w = byId.get(id);
       if (!w) return null;
-      const workspace: Record<string, unknown> = {
-        version: "1.0",
-        workspace: { name: w.name },
-      };
+      const workspace: Record<string, unknown> = { version: "1.0", workspace: { name: w.name } };
       if (w.workspaceConfig) workspace.workspace_config = w.workspaceConfig;
       return { atlas: null, workspace };
     }),

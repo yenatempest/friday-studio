@@ -213,11 +213,9 @@ describe("interpolateConfig with workspace_config bag", () => {
   });
 
   it("does not interfere with flat {{repo_root}} resolution", () => {
-    const result = interpolateConfig(
-      "{{repo_root}} | {{workspace_config.email}}",
-      VARS,
-      { email: "alice@example.com" },
-    );
+    const result = interpolateConfig("{{repo_root}} | {{workspace_config.email}}", VARS, {
+      email: "alice@example.com",
+    });
     expect(result).toBe("/home/user/code/atlas | alice@example.com");
   });
 
@@ -248,22 +246,22 @@ describe("buildWorkspaceConfigBag", () => {
 
   it("excludes entries with no value field (unfilled)", () => {
     const bag = buildWorkspaceConfigBag({
-      workspace_config: { email: { /* no value */ } },
+      workspace_config: {
+        email: {
+          /* no value */
+        },
+      },
     });
     expect(bag).toEqual({});
   });
 
   it("excludes entries with value: null (unfilled)", () => {
-    const bag = buildWorkspaceConfigBag({
-      workspace_config: { email: { value: null } },
-    });
+    const bag = buildWorkspaceConfigBag({ workspace_config: { email: { value: null } } });
     expect(bag).toEqual({});
   });
 
   it("includes empty string (filled)", () => {
-    const bag = buildWorkspaceConfigBag({
-      workspace_config: { note: { value: "" } },
-    });
+    const bag = buildWorkspaceConfigBag({ workspace_config: { note: { value: "" } } });
     expect(bag).toEqual({ note: "" });
   });
 
@@ -281,10 +279,7 @@ describe("buildWorkspaceConfigBag", () => {
 
   it("coerces objects and arrays via JSON.stringify", () => {
     const bag = buildWorkspaceConfigBag({
-      workspace_config: {
-        list: { value: [1, 2, 3] },
-        obj: { value: { a: 1 } },
-      },
+      workspace_config: { list: { value: [1, 2, 3] }, obj: { value: { a: 1 } } },
     });
     expect(bag).toEqual({ list: "[1,2,3]", obj: '{"a":1}' });
   });

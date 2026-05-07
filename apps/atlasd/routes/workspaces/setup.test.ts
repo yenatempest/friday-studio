@@ -109,20 +109,22 @@ function createFixture(options: {
     config = baseConfig(),
   } = options;
 
-  const find = vi.fn().mockResolvedValue(
-    workspace
-      ? {
-          id: workspace.id,
-          name: "Test Workspace",
-          path: workspacePath,
-          configPath: workspace.configPath,
-          status: "inactive" as const,
-          createdAt: new Date().toISOString(),
-          lastSeen: new Date().toISOString(),
-          metadata: workspace.metadata ?? {},
-        }
-      : null,
-  );
+  const find = vi
+    .fn()
+    .mockResolvedValue(
+      workspace
+        ? {
+            id: workspace.id,
+            name: "Test Workspace",
+            path: workspacePath,
+            configPath: workspace.configPath,
+            status: "inactive" as const,
+            createdAt: new Date().toISOString(),
+            lastSeen: new Date().toISOString(),
+            metadata: workspace.metadata ?? {},
+          }
+        : null,
+    );
   const getWorkspaceConfig = vi
     .fn()
     .mockResolvedValue(config ? { atlas: null, workspace: config } : null);
@@ -180,7 +182,10 @@ describe("POST /:workspaceId/setup", () => {
 
   beforeEach(async () => {
     vi.resetModules();
-    testDir = join(tmpdir(), `atlas-setup-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    testDir = join(
+      tmpdir(),
+      `atlas-setup-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
     await mkdir(testDir, { recursive: true });
   });
 
@@ -221,11 +226,7 @@ describe("POST /:workspaceId/setup", () => {
 
     expect(response.status).toBe(400);
     const body = (await response.json()) as JsonBody;
-    expect(body).toMatchObject({
-      success: false,
-      error: "validation",
-      missingKeys: ["region"],
-    });
+    expect(body).toMatchObject({ success: false, error: "validation", missingKeys: ["region"] });
   });
 
   test("accepts request when an unsubmitted key already has a non-null value in YAML", async () => {
@@ -254,16 +255,16 @@ describe("POST /:workspaceId/setup", () => {
     const response = await app.request("/ws-test-id/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceConfigValues: { api_key: "secret-1", region: "us-west-2" },
-      }),
+      body: JSON.stringify({ workspaceConfigValues: { api_key: "secret-1", region: "us-west-2" } }),
     });
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as JsonBody;
     expect(body).toEqual({ success: true });
 
-    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const written = parse(
+      await readFile(join(testDir, "workspace.yml"), "utf-8"),
+    ) as WorkspaceConfig;
     expect(written.workspace_config?.api_key?.value).toBe("secret-1");
     expect(written.workspace_config?.region?.value).toBe("us-west-2");
   });
@@ -277,12 +278,12 @@ describe("POST /:workspaceId/setup", () => {
     await app.request("/ws-test-id/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceConfigValues: { api_key: "secret-1", region: "us-west-2" },
-      }),
+      body: JSON.stringify({ workspaceConfigValues: { api_key: "secret-1", region: "us-west-2" } }),
     });
 
-    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const written = parse(
+      await readFile(join(testDir, "workspace.yml"), "utf-8"),
+    ) as WorkspaceConfig;
     expect(written.version).toBe("1.0");
     expect(written.workspace.name).toBe("Test Workspace");
     expect(written.signals?.hourly?.provider).toBe("schedule");
@@ -304,11 +305,7 @@ describe("POST /:workspaceId/setup", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        workspaceConfigValues: {
-          api_key: "secret-1",
-          region: "us-west-2",
-          uninvited: "value",
-        },
+        workspaceConfigValues: { api_key: "secret-1", region: "us-west-2", uninvited: "value" },
       }),
     });
 
@@ -325,22 +322,20 @@ describe("POST /:workspaceId/setup", () => {
     const r1 = await app.request("/ws-test-id/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceConfigValues: { api_key: "first", region: "us-east-1" },
-      }),
+      body: JSON.stringify({ workspaceConfigValues: { api_key: "first", region: "us-east-1" } }),
     });
     expect(r1.status).toBe(200);
 
     const r2 = await app.request("/ws-test-id/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceConfigValues: { api_key: "second", region: "us-west-2" },
-      }),
+      body: JSON.stringify({ workspaceConfigValues: { api_key: "second", region: "us-west-2" } }),
     });
     expect(r2.status).toBe(200);
 
-    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const written = parse(
+      await readFile(join(testDir, "workspace.yml"), "utf-8"),
+    ) as WorkspaceConfig;
     expect(written.workspace_config?.api_key?.value).toBe("second");
     expect(written.workspace_config?.region?.value).toBe("us-west-2");
   });
@@ -364,16 +359,13 @@ describe("POST /:workspaceId/setup", () => {
 
     expect(response.status).toBe(200);
 
-    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const written = parse(
+      await readFile(join(testDir, "workspace.yml"), "utf-8"),
+    ) as WorkspaceConfig;
     expect(written.workspace_config?.api_key?.value).toBe("secret-1");
     expect(written.workspace_config?.region?.value).toBe("us-west-2");
     const ref = written.tools?.mcp?.servers?.github?.env?.GITHUB_TOKEN;
-    expect(ref).toEqual({
-      from: "link",
-      id: "cred_abc123",
-      provider: "github",
-      key: "token",
-    });
+    expect(ref).toEqual({ from: "link", id: "cred_abc123", provider: "github", key: "token" });
   });
 
   test("returns 400 without writing when a required credential pin is missing", async () => {
@@ -425,14 +417,11 @@ describe("POST /:workspaceId/setup", () => {
 
     expect(response.status).toBe(200);
 
-    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const written = parse(
+      await readFile(join(testDir, "workspace.yml"), "utf-8"),
+    ) as WorkspaceConfig;
     const ref = written.tools?.mcp?.servers?.github?.env?.GITHUB_TOKEN;
-    expect(ref).toEqual({
-      from: "link",
-      id: "cred_override",
-      provider: "github",
-      key: "token",
-    });
+    expect(ref).toEqual({ from: "link", id: "cred_override", provider: "github", key: "token" });
   });
 
   test("calls handleWorkspaceConfigChange after successful write", async () => {
@@ -443,9 +432,7 @@ describe("POST /:workspaceId/setup", () => {
     const response = await app.request("/ws-test-id/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceConfigValues: { api_key: "k", region: "r" },
-      }),
+      body: JSON.stringify({ workspaceConfigValues: { api_key: "k", region: "r" } }),
     });
 
     expect(response.status).toBe(200);
@@ -466,9 +453,7 @@ describe("POST /:workspaceId/setup", () => {
     const response = await app.request("/ws-test-id/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceConfigValues: { contact: "not-an-email", note: "ok" },
-      }),
+      body: JSON.stringify({ workspaceConfigValues: { contact: "not-an-email", note: "ok" } }),
     });
 
     expect(response.status).toBe(400);
@@ -495,14 +480,14 @@ describe("POST /:workspaceId/setup", () => {
     const response = await app.request("/ws-test-id/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceConfigValues: { contact: "alice@example.com", note: "hi" },
-      }),
+      body: JSON.stringify({ workspaceConfigValues: { contact: "alice@example.com", note: "hi" } }),
     });
 
     expect(response.status).toBe(200);
 
-    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const written = parse(
+      await readFile(join(testDir, "workspace.yml"), "utf-8"),
+    ) as WorkspaceConfig;
     expect(written.workspace_config?.contact?.value).toBe("alice@example.com");
     expect(written.workspace_config?.note?.value).toBe("hi");
   });
@@ -522,7 +507,9 @@ describe("POST /:workspaceId/setup", () => {
     });
 
     expect(response.status).toBe(200);
-    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const written = parse(
+      await readFile(join(testDir, "workspace.yml"), "utf-8"),
+    ) as WorkspaceConfig;
     expect(written.workspace_config?.api_key?.value).toBe("anything-goes-!@#$");
   });
 });

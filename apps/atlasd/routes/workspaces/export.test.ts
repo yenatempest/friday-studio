@@ -570,13 +570,8 @@ describe("GET /:workspaceId/export", () => {
             schema: { type: "string", format: "email" },
             value: "alice@example.com",
           },
-          tone: {
-            description: "House voice",
-            value: "casual",
-          },
-          unset_key: {
-            schema: { type: "string" },
-          },
+          tone: { description: "House voice", value: "casual" },
+          unset_key: { schema: { type: "string" } },
         },
       },
     };

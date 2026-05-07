@@ -26,9 +26,7 @@ export function setWorkspaceConfigValues(
   if (!declared) {
     return {
       ok: false,
-      error: validationError(
-        "Workspace has no workspace_config block; nothing to set.",
-      ),
+      error: validationError("Workspace has no workspace_config block; nothing to set."),
     };
   }
 
@@ -36,9 +34,7 @@ export function setWorkspaceConfigValues(
   if (unknownKeys.length > 0) {
     return {
       ok: false,
-      error: validationError(
-        `Unknown workspace_config key(s): ${unknownKeys.join(", ")}`,
-      ),
+      error: validationError(`Unknown workspace_config key(s): ${unknownKeys.join(", ")}`),
     };
   }
 

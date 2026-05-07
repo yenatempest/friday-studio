@@ -88,9 +88,7 @@ function createApp(opts: {
         lastSeen: new Date().toISOString(),
         metadata: {},
       }),
-    getWorkspaceConfig: vi
-      .fn()
-      .mockResolvedValue({ atlas: null, workspace: workspaceConfig }),
+    getWorkspaceConfig: vi.fn().mockResolvedValue({ atlas: null, workspace: workspaceConfig }),
     registerWorkspace: registerSpy,
     list: vi.fn().mockResolvedValue([]),
     deleteWorkspace: vi.fn(),
@@ -312,9 +310,7 @@ describe("workspace bundle endpoints (end-to-end)", () => {
       mcpServersBlock: {
         gmail: {
           transport: { type: "stdio", command: "echo" },
-          env: {
-            GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" },
-          },
+          env: { GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" } },
         },
       },
     });
@@ -364,9 +360,7 @@ describe("workspace bundle endpoints (end-to-end)", () => {
       mcpServersBlock: {
         gmail: {
           transport: { type: "stdio", command: "echo" },
-          env: {
-            GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" },
-          },
+          env: { GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" } },
         },
       },
     });
@@ -400,15 +394,11 @@ describe("workspace bundle endpoints (end-to-end)", () => {
     const { app: exportApp } = createApp({
       workspaceDir,
       homeDir,
-      workspaceConfigBlock: {
-        email_recipient: { description: "Where alerts are sent" },
-      },
+      workspaceConfigBlock: { email_recipient: { description: "Where alerts are sent" } },
       mcpServersBlock: {
         gmail: {
           transport: { type: "stdio", command: "echo" },
-          env: {
-            GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" },
-          },
+          env: { GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" } },
         },
       },
     });

@@ -12,9 +12,9 @@ import type { AppContext, AppVariables } from "../../src/factory.ts";
 
 // Mock storage (FilesystemWorkspaceCreationAdapter used in create)
 const mockWriteWorkspaceFiles = vi.hoisted(() =>
-  vi.fn<(path: string, yaml: string, opts?: unknown) => Promise<void>>().mockResolvedValue(
-    undefined,
-  ),
+  vi
+    .fn<(path: string, yaml: string, opts?: unknown) => Promise<void>>()
+    .mockResolvedValue(undefined),
 );
 vi.mock("@atlas/storage", () => ({
   FilesystemWorkspaceCreationAdapter: class {
@@ -110,9 +110,7 @@ function configWithUnfilledWorkspaceConfig() {
   return {
     version: "1.0",
     workspace: { name: "Test Workspace" },
-    workspace_config: {
-      api_key: { description: "API key", value: null },
-    },
+    workspace_config: { api_key: { description: "API key", value: null } },
   };
 }
 
@@ -121,9 +119,7 @@ function configWithFilledWorkspaceConfig() {
   return {
     version: "1.0",
     workspace: { name: "Test Workspace" },
-    workspace_config: {
-      api_key: { description: "API key", value: "secret-1" },
-    },
+    workspace_config: { api_key: { description: "API key", value: "secret-1" } },
   };
 }
 
@@ -421,4 +417,3 @@ describe("POST /create — setupRequired in response", () => {
     expect(yamlPayload).toContain("provider: github");
   });
 });
-

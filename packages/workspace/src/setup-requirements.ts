@@ -1,10 +1,7 @@
 import type { WorkspaceConfig } from "@atlas/config";
 import { extractCredentials } from "@atlas/config/mutations";
 
-export type ConfigKeyRequirement = {
-  key: string;
-  description?: string;
-};
+export type ConfigKeyRequirement = { key: string; description?: string };
 
 export type CredentialOption = {
   id: string;
@@ -25,20 +22,11 @@ export type SetupRequirements = {
   credentials?: CredentialRequirement[];
 };
 
-export type SetupStatus = {
-  requires_setup: boolean;
-  setup_requirements?: SetupRequirements;
-};
+export type SetupStatus = { requires_setup: boolean; setup_requirements?: SetupRequirements };
 
-export type OverridableRef = {
-  path: string;
-  provider: string;
-  resolvedId: string;
-};
+export type OverridableRef = { path: string; provider: string; resolvedId: string };
 
-export type ResolvedSetupStatus = SetupStatus & {
-  overridableRefs: OverridableRef[];
-};
+export type ResolvedSetupStatus = SetupStatus & { overridableRefs: OverridableRef[] };
 
 export type ResolveDeps = {
   getDefaultByProvider: (provider: string, userId: string) => Promise<{ id: string } | null>;
@@ -142,9 +130,5 @@ export async function resolveWorkspaceSetupRequirements(
     return { requires_setup: false, overridableRefs };
   }
 
-  return {
-    requires_setup: true,
-    setup_requirements: setupRequirements,
-    overridableRefs,
-  };
+  return { requires_setup: true, setup_requirements: setupRequirements, overridableRefs };
 }

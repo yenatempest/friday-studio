@@ -8,10 +8,7 @@ import {
   resolveWorkspaceSetupRequirements,
 } from "../setup-requirements.ts";
 
-const baseConfig = {
-  version: "1.0",
-  workspace: { name: "test-workspace" },
-} as const;
+const baseConfig = { version: "1.0", workspace: { name: "test-workspace" } } as const;
 
 function parse(input: Record<string, unknown>) {
   return WorkspaceConfigSchema.parse({ ...baseConfig, ...input });
@@ -28,14 +25,7 @@ function noCredentialDeps(): ResolveDeps {
 function mcpServerWithEnv(env: Record<string, unknown>) {
   return {
     tools: {
-      mcp: {
-        servers: {
-          "test-server": {
-            transport: { type: "stdio", command: "echo" },
-            env,
-          },
-        },
-      },
+      mcp: { servers: { "test-server": { transport: { type: "stdio", command: "echo" }, env } } },
     },
   };
 }
@@ -98,9 +88,7 @@ describe("resolveConfigOnlySetupRequirements", () => {
   });
 
   it("treats undefined value the same as null", () => {
-    const config = parse({
-      workspace_config: { api_key: { description: "API key" } },
-    });
+    const config = parse({ workspace_config: { api_key: { description: "API key" } } });
     expect(resolveConfigOnlySetupRequirements(config)).toEqual({
       requires_setup: true,
       setup_requirements: { configKeys: [{ key: "api_key", description: "API key" }] },
@@ -116,9 +104,7 @@ describe("resolveWorkspaceSetupRequirements", () => {
     });
 
     it("emits a configKey requirement for an unfilled entry", async () => {
-      const config = parse({
-        workspace_config: { email: { description: "Recipient" } },
-      });
+      const config = parse({ workspace_config: { email: { description: "Recipient" } } });
       const status = await resolveWorkspaceSetupRequirements(config, noCredentialDeps());
       expect(status.requires_setup).toBe(true);
       expect(status.setup_requirements?.configKeys).toEqual([
@@ -173,9 +159,7 @@ describe("resolveWorkspaceSetupRequirements", () => {
   describe("Credential Requirements", () => {
     it("zero credentials, no default → Requirement with options: []", async () => {
       const config = parse(
-        mcpServerWithEnv({
-          GITHUB_TOKEN: { from: "link", provider: "github", key: "token" },
-        }),
+        mcpServerWithEnv({ GITHUB_TOKEN: { from: "link", provider: "github", key: "token" } }),
       );
       const deps: ResolveDeps = {
         getDefaultByProvider: vi.fn(async () => null),
@@ -196,9 +180,7 @@ describe("resolveWorkspaceSetupRequirements", () => {
 
     it("multiple credentials, no default → Requirement surfaces all options with isDefault: false", async () => {
       const config = parse(
-        mcpServerWithEnv({
-          SLACK_TOKEN: { from: "link", provider: "slack", key: "token" },
-        }),
+        mcpServerWithEnv({ SLACK_TOKEN: { from: "link", provider: "slack", key: "token" } }),
       );
       const options: CredentialOption[] = [
         {
@@ -345,9 +327,7 @@ describe("resolveWorkspaceSetupRequirements", () => {
   describe("Combined Requirements", () => {
     it("surfaces both Config and Credential Requirements together", async () => {
       const config = parse({
-        ...mcpServerWithEnv({
-          GITHUB_TOKEN: { from: "link", provider: "github", key: "token" },
-        }),
+        ...mcpServerWithEnv({ GITHUB_TOKEN: { from: "link", provider: "github", key: "token" } }),
         workspace_config: { email: { description: "Recipient" } },
       });
       const deps: ResolveDeps = {

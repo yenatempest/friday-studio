@@ -257,16 +257,16 @@ describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
     const runtimeSpy = vi.fn();
     const internals = daemon as unknown as DaemonInternals;
     internals.workspaceManager = {
-      getWorkspaceConfig: vi.fn().mockResolvedValue({
-        atlas: null,
-        workspace: {
-          version: "1.0",
-          workspace: { name: "needs-setup" },
-          workspace_config: {
-            email_recipient: { description: "Where digest emails go" },
+      getWorkspaceConfig: vi
+        .fn()
+        .mockResolvedValue({
+          atlas: null,
+          workspace: {
+            version: "1.0",
+            workspace: { name: "needs-setup" },
+            workspace_config: { email_recipient: { description: "Where digest emails go" } },
           },
-        },
-      }),
+        }),
     };
     // Override the bound method so a hit would be observable as a call.
     internals.getOrCreateWorkspaceRuntime = runtimeSpy;
@@ -279,10 +279,9 @@ describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
 
   it("passes through to the runtime when the workspace has no setup requirements", async () => {
     const daemon = new AtlasDaemon({ port: 0 });
-    const triggerSignalWithSession = vi.fn().mockResolvedValue({
-      id: "session-1",
-      status: "completed",
-    });
+    const triggerSignalWithSession = vi
+      .fn()
+      .mockResolvedValue({ id: "session-1", status: "completed" });
     const fakeRuntime = {
       workspaceId: "ws-ready",
       triggerSignalWithSession,
@@ -291,10 +290,12 @@ describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
     };
     const internals = daemon as unknown as DaemonInternals;
     internals.workspaceManager = {
-      getWorkspaceConfig: vi.fn().mockResolvedValue({
-        atlas: null,
-        workspace: { version: "1.0", workspace: { name: "ready" } },
-      }),
+      getWorkspaceConfig: vi
+        .fn()
+        .mockResolvedValue({
+          atlas: null,
+          workspace: { version: "1.0", workspace: { name: "ready" } },
+        }),
       updateWorkspaceLastSeen: vi.fn().mockResolvedValue(undefined),
     };
     internals.getOrCreateWorkspaceRuntime = vi.fn().mockResolvedValue(fakeRuntime);
@@ -330,9 +331,7 @@ describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
               servers: {
                 github: {
                   transport: { type: "stdio", command: "npx", args: ["-y", "server-github"] },
-                  env: {
-                    GITHUB_TOKEN: { from: "link", provider: "github", key: "token" },
-                  },
+                  env: { GITHUB_TOKEN: { from: "link", provider: "github", key: "token" } },
                 },
               },
             },
@@ -380,14 +379,16 @@ describe("AtlasDaemon.getOrCreateWorkspaceRuntime setup gate", () => {
     daemon: AtlasDaemon,
     config: { atlas: null; workspace: Record<string, unknown> },
   ): { findSpy: ReturnType<typeof vi.fn>; configSpy: ReturnType<typeof vi.fn> } {
-    const findSpy = vi.fn().mockResolvedValue({
-      id: "ws-1",
-      name: "needs-setup",
-      path: workspaceDir,
-      configPath: join(workspaceDir, "workspace.yml"),
-      status: "active",
-      metadata: {},
-    });
+    const findSpy = vi
+      .fn()
+      .mockResolvedValue({
+        id: "ws-1",
+        name: "needs-setup",
+        path: workspaceDir,
+        configPath: join(workspaceDir, "workspace.yml"),
+        status: "active",
+        metadata: {},
+      });
     const configSpy = vi.fn().mockResolvedValue(config);
     const internals = daemon as unknown as DaemonInternals;
     internals.isInitialized = true;

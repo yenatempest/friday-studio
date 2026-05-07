@@ -352,9 +352,7 @@ const workspacesRoutes = daemonFactory
             type: w.metadata?.ephemeral ? "ephemeral" : "persistent",
             canonical: w.metadata?.canonical,
             requires_setup: setup?.requires_setup ?? false,
-            ...(setup?.setup_requirements
-              ? { setup_requirements: setup.setup_requirements }
-              : {}),
+            ...(setup?.setup_requirements ? { setup_requirements: setup.setup_requirements } : {}),
           };
         })
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
@@ -988,9 +986,7 @@ const workspacesRoutes = daemonFactory
           type: workspace.metadata?.ephemeral ? "ephemeral" : "persistent",
           config: config?.workspace || null,
           requires_setup: setup?.requires_setup ?? false,
-          ...(setup?.setup_requirements
-            ? { setup_requirements: setup.setup_requirements }
-            : {}),
+          ...(setup?.setup_requirements ? { setup_requirements: setup.setup_requirements } : {}),
         },
         200,
       );

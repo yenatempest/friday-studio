@@ -805,9 +805,7 @@ describe("setup_requirements payload on list / config endpoints", () => {
       workspace: {
         version: "1.0",
         workspace: { name },
-        workspace_config: {
-          email_recipient: { description: "Where to send alerts" },
-        },
+        workspace_config: { email_recipient: { description: "Where to send alerts" } },
       },
     };
   }
@@ -877,9 +875,7 @@ describe("setup_requirements payload on list / config endpoints", () => {
       expect(a?.requires_setup).toBe(false);
       expect(a?.setup_requirements).toBeUndefined();
       expect(b?.requires_setup).toBe(true);
-      expect(b?.setup_requirements).toMatchObject({
-        configKeys: [{ key: "email_recipient" }],
-      });
+      expect(b?.setup_requirements).toMatchObject({ configKeys: [{ key: "email_recipient" }] });
     });
 
     test("falls back to requires_setup: false when config is null (deleted/missing)", async () => {
@@ -954,9 +950,7 @@ describe("setup_requirements payload on list / config endpoints", () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.requires_setup).toBe(true);
-      expect(body.setup_requirements).toMatchObject({
-        configKeys: [{ key: "email_recipient" }],
-      });
+      expect(body.setup_requirements).toMatchObject({ configKeys: [{ key: "email_recipient" }] });
     });
 
     test("returns requires_setup: false when config has no workspace_config block", async () => {

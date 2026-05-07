@@ -27,9 +27,7 @@ describe("WorkspaceConfigEntrySchema", () => {
   });
 
   it("parses an entry with schema { type: string, format: email }", () => {
-    const entry = WorkspaceConfigEntrySchema.parse({
-      schema: { type: "string", format: "email" },
-    });
+    const entry = WorkspaceConfigEntrySchema.parse({ schema: { type: "string", format: "email" } });
     expect(entry.schema?.type).toBe("string");
   });
 
@@ -53,10 +51,7 @@ describe("WorkspaceConfigEntrySchema", () => {
 
 describe("WorkspaceConfigSchema workspace_config block", () => {
   it("parses an empty workspace_config record", () => {
-    const config = WorkspaceConfigSchema.parse({
-      ...minimalWorkspace,
-      workspace_config: {},
-    });
+    const config = WorkspaceConfigSchema.parse({ ...minimalWorkspace, workspace_config: {} });
     expect(config.workspace_config).toEqual({});
   });
 
@@ -88,9 +83,7 @@ describe("WorkspaceConfigSchema workspace_config block", () => {
     expect(() =>
       WorkspaceConfigSchema.parse({
         ...minimalWorkspace,
-        workspace_config: {
-          email: { description: "x", typo_field: "bad" },
-        },
+        workspace_config: { email: { description: "x", typo_field: "bad" } },
       }),
     ).toThrow();
   });

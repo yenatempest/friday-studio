@@ -15,10 +15,7 @@ describe("setWorkspaceConfigValues", () => {
       },
     });
 
-    const result = setWorkspaceConfigValues(config, {
-      api_key: "secret-1",
-      region: "us-west-2",
-    });
+    const result = setWorkspaceConfigValues(config, { api_key: "secret-1", region: "us-west-2" });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -29,9 +26,7 @@ describe("setWorkspaceConfigValues", () => {
 
   test("preserves entry metadata (description, schema)", () => {
     const config = createTestConfig({
-      workspace_config: {
-        api_key: { description: "API key", value: null },
-      },
+      workspace_config: { api_key: { description: "API key", value: null } },
     });
 
     const result = setWorkspaceConfigValues(config, { api_key: "secret-1" });
@@ -47,10 +42,7 @@ describe("setWorkspaceConfigValues", () => {
       workspace_config: { api_key: { description: "API key", value: null } },
     });
 
-    const result = setWorkspaceConfigValues(config, {
-      api_key: "secret-1",
-      uninvited: "value",
-    });
+    const result = setWorkspaceConfigValues(config, { api_key: "secret-1", uninvited: "value" });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
