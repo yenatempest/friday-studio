@@ -2,8 +2,8 @@
  * Integration tests for POST /:workspaceId/setup.
  *
  * Tests Setup Completion: writing user-supplied workspace_config values and
- * credential `id` pins into workspace.yml via a single applyMutation invocation.
- * JSON-Schema validation is out of scope (see task #12).
+ * credential `id` pins into workspace.yml via a single applyMutation invocation,
+ * plus per-key JSON-Schema validation against `workspace_config[key].schema`.
  *
  * NOTE: applyMutation strips YAML comments via @std/yaml — see task #26.
  * Tests assert structure preservation only.
@@ -39,6 +39,29 @@ function baseConfig(): WorkspaceConfig {
       },
     },
   } as WorkspaceConfig;
+}
+
+function configWithEmailSchema(): WorkspaceConfig {
+  return WorkspaceConfigSchema.parse({
+    version: "1.0",
+    workspace: { id: "ws-test-id", name: "Test Workspace" },
+    workspace_config: {
+      contact: {
+        description: "Contact email",
+        schema: { type: "string", format: "email" },
+        value: null,
+      },
+      // Sibling key with no schema — accepts any string.
+      note: { description: "Free-form note", value: null },
+    },
+    signals: {
+      hourly: {
+        provider: "schedule",
+        description: "Hourly tick",
+        config: { schedule: "0 * * * *", timezone: "UTC" },
+      },
+    },
+  });
 }
 
 function configWithGithubLinkRef(env: Record<string, unknown>): WorkspaceConfig {
@@ -431,5 +454,75 @@ describe("POST /:workspaceId/setup", () => {
       expect.objectContaining({ id: "ws-test-id", path: testDir }),
       join(testDir, "workspace.yml"),
     );
+  });
+
+  test("returns 400 with per-field errors when a value fails its schema (format: email)", async () => {
+    const initial = configWithEmailSchema();
+    const original = stringify(initial);
+    await writeFile(join(testDir, "workspace.yml"), original);
+    const { app } = createFixture({ workspacePath: testDir, config: initial });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceConfigValues: { contact: "not-an-email", note: "ok" },
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as JsonBody;
+    expect(body).toMatchObject({
+      success: false,
+      error: "validation",
+      message: "workspace_config values failed schema validation",
+    });
+    expect(body.fieldErrors).toHaveProperty("contact");
+    expect(body.fieldErrors).not.toHaveProperty("note");
+
+    // No write happened.
+    const onDisk = await readFile(join(testDir, "workspace.yml"), "utf-8");
+    expect(onDisk).toBe(original);
+  });
+
+  test("accepts a valid email value when schema declares format: email", async () => {
+    const initial = configWithEmailSchema();
+    await writeFile(join(testDir, "workspace.yml"), stringify(initial));
+    const { app } = createFixture({ workspacePath: testDir, config: initial });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceConfigValues: { contact: "alice@example.com", note: "hi" },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+
+    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    expect(written.workspace_config?.contact?.value).toBe("alice@example.com");
+    expect(written.workspace_config?.note?.value).toBe("hi");
+  });
+
+  test("entry without `schema` accepts arbitrary strings", async () => {
+    // baseConfig() declares api_key + region with no schemas.
+    await writeFile(join(testDir, "workspace.yml"), stringify(baseConfig()));
+    const { app } = createFixture({ workspacePath: testDir });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceConfigValues: { api_key: "anything-goes-!@#$", region: "us-west-2" },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    expect(written.workspace_config?.api_key?.value).toBe("anything-goes-!@#$");
   });
 });

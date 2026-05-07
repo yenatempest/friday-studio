@@ -1435,8 +1435,9 @@ const workspacesRoutes = daemonFactory
     },
   )
   // Setup Completion: write user-supplied workspace_config values and credential
-  // pin choices into YAML. Single endpoint for finishing or re-editing setup.
-  // JSON-Schema value validation is a separate follow-up (#12).
+  // pin choices into YAML. Validates each value against its declared
+  // `workspace_config[key].schema` (JSON Schema) before composing mutations.
+  // Single endpoint for finishing or re-editing setup.
   .post(
     "/:workspaceId/setup",
     zValidator("param", z.object({ workspaceId: z.string() })),
@@ -1482,6 +1483,37 @@ const workspacesRoutes = daemonFactory
             error: "validation",
             message: "Missing required workspace_config values",
             missingKeys,
+          },
+          400,
+        );
+      }
+
+      // For each submitted value whose entry declares a `schema`, validate it
+      // via `z.fromJSONSchema(schema)`. Entries without a schema accept the
+      // value as-is (treated as a plain string). Validation failures surface
+      // per-field; no YAML write happens.
+      const fieldErrors: Record<string, string[]> = {};
+      for (const [key, value] of Object.entries(workspaceConfigValues)) {
+        const entry = declared[key];
+        if (!entry?.schema) continue;
+        // Widen to Record<string, unknown> — zod's JSONSchema type has a
+        // looser `items: _JSONSchema | _JSONSchema[]` than our parsed shape
+        // (single-form). The widen sidesteps that mismatch via the index
+        // signature both types share.
+        const raw: Record<string, unknown> = entry.schema;
+        const fieldSchema = z.fromJSONSchema(raw);
+        const result = fieldSchema.safeParse(value);
+        if (!result.success) {
+          fieldErrors[key] = result.error.issues.map((issue) => issue.message);
+        }
+      }
+      if (Object.keys(fieldErrors).length > 0) {
+        return c.json(
+          {
+            success: false,
+            error: "validation",
+            message: "workspace_config values failed schema validation",
+            fieldErrors,
           },
           400,
         );

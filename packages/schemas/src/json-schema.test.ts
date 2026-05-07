@@ -41,6 +41,11 @@ describe("JSONSchemaSchema", () => {
   it("rejects invalid type values", () => {
     expect(() => JSONSchemaSchema.parse({ type: "nonsense" })).toThrow();
   });
+
+  it("preserves the `format` keyword so downstream z.fromJSONSchema can apply it", () => {
+    const result = JSONSchemaSchema.parse({ type: "string", format: "email" });
+    expect(result).toEqual({ type: "string", format: "email" });
+  });
 });
 
 // ---------------------------------------------------------------------------

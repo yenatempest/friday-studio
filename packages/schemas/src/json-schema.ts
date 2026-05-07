@@ -20,6 +20,7 @@ interface JSONSchemaShape {
   minLength?: number;
   maxLength?: number;
   pattern?: string;
+  format?: string;
   additionalProperties?: boolean | JSONSchemaShape;
   description?: string;
 }
@@ -36,6 +37,10 @@ export const JSONSchemaSchema: z.ZodType<JSONSchemaShape> = z.lazy(() =>
     minLength: z.number().optional(),
     maxLength: z.number().optional(),
     pattern: z.string().optional(),
+    // `format` survives the parse so `z.fromJSONSchema()` can apply email /
+    // uri / uuid / date-time / ipv4 / ipv6 / etc. checks downstream. Without
+    // this declaration the non-strict z.object would silently strip it.
+    format: z.string().optional(),
     additionalProperties: z.union([z.boolean(), JSONSchemaSchema]).optional(),
     description: z.string().optional(),
   }),
