@@ -28,6 +28,15 @@
   import { discoverQueries, type DiscoverDetail } from "$lib/queries/discover-queries";
   import { workspaceQueries } from "$lib/queries";
   import DOMPurify from "dompurify";
+  import { z } from "zod";
+
+  const ImportResponseSchema = z
+    .object({
+      workspaceId: z.string(),
+      name: z.string().optional(),
+      setupRequired: z.boolean().optional(),
+    })
+    .passthrough();
 
   const queryClient = useQueryClient();
 
@@ -82,15 +91,19 @@
         toast({ title: message, error: true });
         return;
       }
-      const parsed =
-        body && typeof body === "object" && body !== null
-          ? (body as { workspaceId?: string; name?: string })
-          : {};
+      const parsed = ImportResponseSchema.safeParse(body);
       await queryClient.invalidateQueries({ queryKey: workspaceQueries.all() });
-      toast({ title: `Imported: ${parsed.name ?? detail?.name ?? selectedSlug}` });
-      if (parsed.workspaceId) {
-        await goto(`/platform/${parsed.workspaceId}`);
+      if (!parsed.success) {
+        toast({ title: `Imported: ${detail?.name ?? selectedSlug}` });
+        return;
       }
+      const { workspaceId, name, setupRequired } = parsed.data;
+      toast({ title: `Imported: ${name ?? detail?.name ?? selectedSlug}` });
+      await goto(
+        setupRequired === true
+          ? `/platform/${workspaceId}/setup`
+          : `/platform/${workspaceId}`,
+      );
     } finally {
       importing = false;
     }
