@@ -18,6 +18,7 @@ import { getCanonicalKind } from "./canonical.ts";
 import { ensureDefaultUserWorkspace } from "./first-run-bootstrap.ts";
 import { generateUniqueWorkspaceName } from "./id-generator.ts";
 import type { WorkspaceRuntime } from "./runtime.ts";
+import { hasUnfilledConfigKeys } from "./setup-requirements.ts";
 import type { RegistryStorageAdapter } from "./storage.ts";
 import type { WorkspaceEntry, WorkspaceSignalRegistrar, WorkspaceStatus } from "./types.ts";
 import { WorkspaceConfigWatcher } from "./watchers/index.ts";
@@ -103,7 +104,7 @@ export function validateMCPEnvironmentForWorkspace(
 export class WorkspaceManager {
   private registry: RegistryStorageAdapter;
   private runtimes = new Map<string, WorkspaceRuntime>();
-  private signalRegistrars: WorkspaceSignalRegistrar[] = [];
+  protected signalRegistrars: WorkspaceSignalRegistrar[] = [];
   private fileWatcher: WorkspaceConfigWatcher | null = null;
   private onRuntimeInvalidate?: RuntimeInvalidateCallback;
   private memoryAdapter?: MemoryAdapter & {
@@ -839,6 +840,10 @@ export class WorkspaceManager {
     config: MergedConfig,
   ): Promise<void> {
     if (this.signalRegistrars.length === 0) return;
+    if (hasUnfilledConfigKeys(config.workspace)) {
+      logger.info("Skipping signal registration: workspace requires setup", { workspaceId });
+      return;
+    }
     for (const registrar of this.signalRegistrars) {
       try {
         await registrar.registerWorkspace(workspaceId, workspacePath, config);
@@ -1134,6 +1139,10 @@ export class WorkspaceManager {
       await this.unregisterWithRegistrars(workspaceId);
     } catch (error) {
       logger.debug("Error during signal unregister", { workspaceId, error });
+    }
+    if (hasUnfilledConfigKeys(config.workspace)) {
+      logger.info("Skipping signal restart: workspace requires setup", { workspaceId });
+      return;
     }
     try {
       await this.registerWithRegistrars(workspaceId, workspacePath, config);
