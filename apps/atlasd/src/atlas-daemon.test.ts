@@ -4,7 +4,11 @@
  * Discord Gateway service plumbing via narrow spies — no real WebSockets.
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import process from "node:process";
+import { WorkspaceSetupRequiredError } from "@atlas/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AtlasDaemon } from "./atlas-daemon.ts";
 import { DiscordGatewayService } from "./discord-gateway-service.ts";
@@ -342,6 +346,113 @@ describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
 
     expect(result).toEqual({ skipped: true, reason: "setup_required" });
     expect(runtimeSpy).not.toHaveBeenCalled();
+    expect(mockResolveCredentialsByProvider).toHaveBeenCalledWith("github");
+  });
+});
+
+describe("AtlasDaemon.getOrCreateWorkspaceRuntime setup gate", () => {
+  type DaemonInternals = {
+    isInitialized: boolean;
+    workspaceManager: {
+      find: (q: { id?: string; name?: string }) => Promise<unknown>;
+      getWorkspaceConfig: (id: string) => Promise<unknown>;
+      updateWorkspaceStatus?: (
+        id: string,
+        status: string,
+        opts?: Record<string, unknown>,
+      ) => Promise<void>;
+    };
+    agentRegistry?: { registerAgent: (agent: unknown) => Promise<void> } | null;
+  };
+
+  let workspaceDir: string;
+
+  beforeEach(async () => {
+    mockResolveCredentialsByProvider.mockReset();
+    workspaceDir = await mkdtemp(join(tmpdir(), "ws-runtime-gate-"));
+  });
+
+  afterEach(async () => {
+    await rm(workspaceDir, { recursive: true, force: true });
+  });
+
+  function stubManagerFor(
+    daemon: AtlasDaemon,
+    config: { atlas: null; workspace: Record<string, unknown> },
+  ): { findSpy: ReturnType<typeof vi.fn>; configSpy: ReturnType<typeof vi.fn> } {
+    const findSpy = vi.fn().mockResolvedValue({
+      id: "ws-1",
+      name: "needs-setup",
+      path: workspaceDir,
+      configPath: join(workspaceDir, "workspace.yml"),
+      status: "active",
+      metadata: {},
+    });
+    const configSpy = vi.fn().mockResolvedValue(config);
+    const internals = daemon as unknown as DaemonInternals;
+    internals.isInitialized = true;
+    internals.workspaceManager = {
+      find: findSpy,
+      getWorkspaceConfig: configSpy,
+      updateWorkspaceStatus: vi.fn().mockResolvedValue(undefined),
+    };
+    // Detect any leak past the gate — a registerAgent call would mean the
+    // gate failed to short-circuit before agent setup.
+    internals.agentRegistry = { registerAgent: vi.fn().mockResolvedValue(undefined) };
+    return { findSpy, configSpy };
+  }
+
+  it("throws WorkspaceSetupRequiredError without registering agents when workspace_config has unfilled entries", async () => {
+    const daemon = new AtlasDaemon({ port: 0 });
+    stubManagerFor(daemon, {
+      atlas: null,
+      workspace: {
+        version: "1.0",
+        workspace: { name: "needs-setup" },
+        workspace_config: { email_recipient: { description: "Where digest emails go" } },
+        agents: {
+          // Would normally register at runtime creation. Should never run.
+          assistant: { type: "llm", model: "gpt-4o-mini" },
+        },
+      },
+    });
+    const internals = daemon as unknown as DaemonInternals;
+
+    await expect(daemon.getOrCreateWorkspaceRuntime("ws-1")).rejects.toBeInstanceOf(
+      WorkspaceSetupRequiredError,
+    );
+
+    expect(internals.agentRegistry?.registerAgent).not.toHaveBeenCalled();
+  });
+
+  it("throws WorkspaceSetupRequiredError when a provider-only credential ref has no Link default", async () => {
+    mockResolveCredentialsByProvider.mockResolvedValue([]);
+
+    const daemon = new AtlasDaemon({ port: 0 });
+    stubManagerFor(daemon, {
+      atlas: null,
+      workspace: {
+        version: "1.0",
+        workspace: { name: "no-default-cred" },
+        tools: {
+          mcp: {
+            servers: {
+              github: {
+                transport: { type: "stdio", command: "npx", args: ["-y", "server-github"] },
+                env: { GITHUB_TOKEN: { from: "link", provider: "github", key: "token" } },
+              },
+            },
+          },
+        },
+      },
+    });
+    const internals = daemon as unknown as DaemonInternals;
+
+    await expect(daemon.getOrCreateWorkspaceRuntime("ws-1")).rejects.toBeInstanceOf(
+      WorkspaceSetupRequiredError,
+    );
+
+    expect(internals.agentRegistry?.registerAgent).not.toHaveBeenCalled();
     expect(mockResolveCredentialsByProvider).toHaveBeenCalledWith("github");
   });
 });

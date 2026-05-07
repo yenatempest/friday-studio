@@ -13,6 +13,7 @@ import {
   SessionFailedError,
   WorkspaceNotFoundError,
   WorkspaceSessionStatus,
+  WorkspaceSetupRequiredError,
   wrapAtlasAgent,
 } from "@atlas/core";
 import { initArtifactStorage } from "@atlas/core/artifacts/server";
@@ -1482,6 +1483,25 @@ export class AtlasDaemon {
         signals: Object.keys(mergedConfig.workspace?.signals || {}).length,
         agents: Object.keys(mergedConfig.workspace?.agents || {}).length,
       });
+
+      // Setup gate: catch chat-path triggers (which bypass the cascade gate
+      // in `triggerWorkspaceSignal`) and any other direct callers before
+      // agents register. System workspaces never gate — they have no
+      // `workspace_config` block and skip user-credential setup. See design
+      // doc § 5(b).
+      if (!workspace.metadata?.system) {
+        const userId = (await getCurrentUserId()) ?? "daemon";
+        const status = await resolveWorkspaceSetupRequirements(
+          mergedConfig.workspace,
+          buildSetupResolveDeps(userId),
+        );
+        if (status.requires_setup) {
+          logger.info("Refusing to instantiate runtime — workspace requires setup", {
+            workspaceId: workspace.id,
+          });
+          throw new WorkspaceSetupRequiredError(workspace.id);
+        }
+      }
 
       // Re-validate MCP environment at runtime creation (env vars may have changed since registration)
       if (!workspace.metadata?.system) {
