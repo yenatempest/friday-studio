@@ -32,6 +32,15 @@ export type { RuntimeInvalidateCallback } from "./src/manager.ts";
 export { validateMCPEnvironmentForWorkspace, WorkspaceManager } from "./src/manager.ts";
 // Runtime
 export { classifySessionError, WorkspaceRuntime } from "./src/runtime.ts";
+// Setup requirements
+export type {
+  ConfigKeyRequirement,
+  CredentialOption,
+  CredentialRequirement,
+  SetupRequirements,
+  SetupStatus,
+} from "./src/setup-requirements.ts";
+export { resolveWorkspaceSetupRequirements } from "./src/setup-requirements.ts";
 // Storage factories and registry adapter
 export {
   createJetStreamKVStorage,
