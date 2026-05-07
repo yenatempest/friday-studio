@@ -215,6 +215,7 @@ describe("POST /:workspaceId/setup", () => {
   });
 
   test("preserves unrelated YAML structure (sibling keys + descriptions)", async () => {
+    // applyMutation strips comments via @std/yaml — see task #26
     await writeFile(join(testDir, "workspace.yml"), stringify(baseConfig()));
     const { app } = createFixture({ workspacePath: testDir });
     await mountRoutes(app);
