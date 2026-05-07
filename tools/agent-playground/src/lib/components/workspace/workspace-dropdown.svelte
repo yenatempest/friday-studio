@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { DropdownMenu, IconSmall } from "@atlas/ui";
+  import { Badge, DropdownMenu, IconSmall } from "@atlas/ui";
   import { createQuery } from "@tanstack/svelte-query";
   import { workspaceQueries } from "$lib/queries";
 
@@ -43,9 +43,17 @@
   <DropdownMenu.Content size="regular">
     <DropdownMenu.List>
       {#each workspaces as ws (ws.id)}
-        <DropdownMenu.Item href="/platform/{ws.id}/chat" radio checked={ws.id === selected}>
+        {@const href = ws.requires_setup
+          ? `/platform/${ws.id}/setup`
+          : `/platform/${ws.id}/chat`}
+        <DropdownMenu.Item {href} radio checked={ws.id === selected}>
           {#snippet prepend()}
             <span class="dot" style:--dot-color={dotColor(ws.metadata?.color)}></span>
+          {/snippet}
+          {#snippet append()}
+            {#if ws.requires_setup}
+              <Badge variant="warning">Setup</Badge>
+            {/if}
           {/snippet}
           {ws.displayName}
         </DropdownMenu.Item>

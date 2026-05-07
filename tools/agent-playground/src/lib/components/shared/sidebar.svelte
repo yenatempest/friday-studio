@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Collapsible, Dialog, IconLarge, IconSmall } from "@atlas/ui";
+  import { Badge, Collapsible, Dialog, IconLarge, IconSmall } from "@atlas/ui";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { browser } from "$app/environment";
   import { page } from "$app/state";
@@ -175,12 +175,18 @@
         <ul class="section-list">
           {#each visibleWorkspaces as ws (ws.id)}
             {@const active = activeWorkspaceId === ws.id}
+            {@const href = ws.requires_setup
+              ? `/platform/${ws.id}/setup`
+              : `/platform/${ws.id}`}
             <li>
-              <a href="/platform/{ws.id}" class="nav-item" class:active>
+              <a {href} class="nav-item" class:active>
                 <span class="dot" style:--dot-color={dotColor(ws.metadata?.color)}></span>
                 <span class="text">
                   {ws.displayName}
                 </span>
+                {#if ws.requires_setup}
+                  <Badge variant="warning">Setup</Badge>
+                {/if}
               </a>
 
               {#if active}
