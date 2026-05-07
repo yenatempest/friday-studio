@@ -1,10 +1,16 @@
 <!--
   Workspace setup page — fills in declared `workspace_config` values.
 
-  Reads `setup_requirements.configKeys` from the workspace config endpoint
-  (served by the daemon when `requires_setup` is true) and renders one text
-  input per requirement. On Finish, posts values to `POST /:workspaceId/setup`
-  and navigates back to the workspace root.
+  Two modes share one form:
+  - Setup (`requires_setup === true`): renders the unfilled keys from the
+    daemon's `setup_requirements.configKeys`. Submit label "Finish setup".
+  - Edit (`requires_setup === false`): renders every declared
+    `workspace_config[*]` entry, prefilled from each entry's existing
+    `value`. Submit label "Save changes". The setup page doubles as the
+    editor (design § 8); there is no separate edit UI.
+
+  Both modes POST to `/:workspaceId/setup` with the same payload shape and
+  navigate to `/platform/{workspaceId}` on success.
 
   Config Requirements only — Credential Requirements come in task #18.
 
@@ -27,27 +33,72 @@
   const configQuery = createQuery(() => workspaceQueries.config(workspaceId));
 
   /**
-   * Config Requirements derived from the daemon's `setup_requirements.configKeys`.
-   * Empty array if the workspace has no requirements (setup already complete).
+   * Edit-mode derivation: parse the `workspace_config` block from the
+   * config response so we can list every declared key and seed inputs
+   * from each entry's existing `value`. Hono RPC types this as a broad
+   * union; runtime parsing keeps us honest about what's actually there.
    */
-  const configKeys = $derived.by(() => {
-    const data = configQuery.data;
-    if (!data || !("setup_requirements" in data)) return [];
-    const reqs = data.setup_requirements;
-    if (!reqs || !("configKeys" in reqs) || !Array.isArray(reqs.configKeys)) return [];
-    return reqs.configKeys;
-  });
+  const WorkspaceConfigEntrySchema = z
+    .object({
+      description: z.string().optional(),
+      value: z.unknown().optional(),
+    })
+    .passthrough();
+  const ConfigBlockSchema = z
+    .object({
+      workspace_config: z.record(z.string(), WorkspaceConfigEntrySchema).optional(),
+    })
+    .passthrough();
+
+  /** Coerce a stored YAML value to a single-line string for the text input. */
+  function coerceToInputValue(v: unknown): string {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    return JSON.stringify(v);
+  }
 
   const requiresSetup = $derived(configQuery.data?.requires_setup === true);
 
+  /**
+   * Entries to render. Initial setup mode pulls from the daemon's
+   * `setup_requirements.configKeys` (unfilled keys only). Edit mode pulls
+   * every declared key from `workspace_config`, in YAML order.
+   */
+  const configKeys = $derived.by((): { key: string; description?: string }[] => {
+    const data = configQuery.data;
+    if (!data) return [];
+    if (requiresSetup) {
+      if (!("setup_requirements" in data)) return [];
+      const reqs = data.setup_requirements;
+      if (!reqs || !("configKeys" in reqs) || !Array.isArray(reqs.configKeys)) return [];
+      return reqs.configKeys;
+    }
+    const parsed = ConfigBlockSchema.safeParse(data.config);
+    if (!parsed.success) return [];
+    const block = parsed.data.workspace_config ?? {};
+    return Object.entries(block).map(([key, entry]) => ({ key, description: entry.description }));
+  });
+
+  /** Existing values keyed by config key — only populated in edit mode. */
+  const initialValues = $derived.by((): Record<string, string> => {
+    if (requiresSetup) return {};
+    const parsed = ConfigBlockSchema.safeParse(configQuery.data?.config);
+    if (!parsed.success) return {};
+    const block = parsed.data.workspace_config ?? {};
+    const out: Record<string, string> = {};
+    for (const [key, entry] of Object.entries(block)) out[key] = coerceToInputValue(entry.value);
+    return out;
+  });
+
   let values = $state<Record<string, string>>({});
 
-  // Initialize empty strings for any newly-seen key. Re-runs when the
-  // configKeys array changes (e.g. on first data load); preserves any
-  // user input already typed for existing keys.
+  // Seed inputs for any newly-seen key. Setup mode seeds empty strings;
+  // edit mode seeds from each entry's existing `value`. Preserves any
+  // user input already typed for previously-seen keys.
   $effect(() => {
     for (const entry of configKeys) {
-      if (!(entry.key in values)) values[entry.key] = "";
+      if (!(entry.key in values)) values[entry.key] = initialValues[entry.key] ?? "";
     }
   });
 
@@ -119,16 +170,20 @@
     <p class="state-msg">Loading workspace…</p>
   {:else if configQuery.isError}
     <p class="state-msg">Failed to load workspace: {configQuery.error?.message}</p>
-  {:else if !requiresSetup}
+  {:else if configKeys.length === 0}
     <div class="complete">
-      <h1>Setup complete</h1>
-      <p>This workspace is ready to run.</p>
+      <h1>Nothing to configure</h1>
+      <p>This workspace has no declared <code>workspace_config</code> keys.</p>
       <Button variant="primary" href="/platform/{workspaceId}">Open workspace</Button>
     </div>
   {:else}
     <header class="header">
-      <h1>Finish workspace setup</h1>
-      <p class="subtitle">Fill in the values below to start using this workspace.</p>
+      <h1>{requiresSetup ? "Finish workspace setup" : "Workspace configuration"}</h1>
+      <p class="subtitle">
+        {requiresSetup
+          ? "Fill in the values below to start using this workspace."
+          : "Update declared workspace values. Saving rewrites workspace.yml."}
+      </p>
     </header>
 
     <form
@@ -160,7 +215,7 @@
 
       <div class="actions">
         <Button type="submit" variant="primary" disabled={!allFilled || submitting}>
-          {submitting ? "Saving…" : "Finish setup"}
+          {submitting ? "Saving…" : requiresSetup ? "Finish setup" : "Save changes"}
         </Button>
       </div>
     </form>
@@ -282,5 +337,14 @@
     color: color-mix(in srgb, var(--color-text), transparent 30%);
     font-size: var(--font-size-3);
     margin: 0;
+  }
+
+  .complete p code {
+    background-color: var(--color-surface-1);
+    border-radius: var(--radius-1);
+    color: var(--color-text);
+    font-family: var(--font-family-monospace);
+    font-size: var(--font-size-2);
+    padding: 0 var(--size-1);
   }
 </style>
