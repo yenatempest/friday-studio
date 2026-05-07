@@ -228,3 +228,68 @@ describe("AtlasDaemon.shutdown stops the Discord Gateway service", () => {
     ).toBeNull();
   });
 });
+
+describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
+  type DaemonInternals = {
+    workspaceManager: {
+      getWorkspaceConfig: (id: string) => Promise<unknown>;
+      updateWorkspaceLastSeen?: (id: string) => Promise<void>;
+    };
+    getOrCreateWorkspaceRuntime: (id: string) => Promise<unknown>;
+  };
+
+  it("returns the setup_required sentinel without instantiating a runtime when workspace_config has unfilled entries", async () => {
+    const daemon = new AtlasDaemon({ port: 0 });
+    const runtimeSpy = vi.fn();
+    const internals = daemon as unknown as DaemonInternals;
+    internals.workspaceManager = {
+      getWorkspaceConfig: vi.fn().mockResolvedValue({
+        atlas: null,
+        workspace: {
+          version: "1.0",
+          workspace: { name: "needs-setup" },
+          workspace_config: {
+            email_recipient: { description: "Where digest emails go" },
+          },
+        },
+      }),
+    };
+    // Override the bound method so a hit would be observable as a call.
+    internals.getOrCreateWorkspaceRuntime = runtimeSpy;
+
+    const result = await daemon.triggerWorkspaceSignal("ws-needs-setup", "any-signal");
+
+    expect(result).toEqual({ skipped: true, reason: "setup_required" });
+    expect(runtimeSpy).not.toHaveBeenCalled();
+  });
+
+  it("passes through to the runtime when the workspace has no setup requirements", async () => {
+    const daemon = new AtlasDaemon({ port: 0 });
+    const triggerSignalWithSession = vi.fn().mockResolvedValue({
+      id: "session-1",
+      status: "completed",
+    });
+    const fakeRuntime = {
+      workspaceId: "ws-ready",
+      triggerSignalWithSession,
+      getSignalProvider: vi.fn().mockReturnValue("http"),
+      getSessionFsmDocuments: vi.fn().mockReturnValue([]),
+    };
+    const internals = daemon as unknown as DaemonInternals;
+    internals.workspaceManager = {
+      getWorkspaceConfig: vi.fn().mockResolvedValue({
+        atlas: null,
+        workspace: { version: "1.0", workspace: { name: "ready" } },
+      }),
+      updateWorkspaceLastSeen: vi.fn().mockResolvedValue(undefined),
+    };
+    internals.getOrCreateWorkspaceRuntime = vi.fn().mockResolvedValue(fakeRuntime);
+    // Avoid touching the idle-timeout map in this isolated test.
+    (daemon as unknown as { resetIdleTimeout: (id: string) => void }).resetIdleTimeout = vi.fn();
+
+    const result = await daemon.triggerWorkspaceSignal("ws-ready", "any-signal");
+
+    expect(result).toEqual({ sessionId: "session-1", output: [] });
+    expect(triggerSignalWithSession).toHaveBeenCalledOnce();
+  });
+});

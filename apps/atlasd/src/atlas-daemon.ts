@@ -18,6 +18,10 @@ import {
 import { initArtifactStorage } from "@atlas/core/artifacts/server";
 import { ensureChatsKVBucket, initChatStorage } from "@atlas/core/chat/storage";
 import { bootstrapElicitationsStream, initElicitationStorage } from "@atlas/core/elicitations";
+import {
+  type CredentialSummary,
+  resolveCredentialsByProvider,
+} from "@atlas/core/mcp-registry/credential-resolver";
 import { initMCPRegistryAdapter } from "@atlas/core/mcp-registry/storage";
 import { CronManager } from "@atlas/cron";
 import { initDocumentStore } from "@atlas/document-store";
@@ -37,6 +41,8 @@ import { getFridayHome } from "@atlas/utils/paths.server";
 import {
   createJetStreamKVStorage,
   createRegistryStorageJS,
+  type ResolveDeps,
+  resolveWorkspaceSetupRequirements,
   validateMCPEnvironmentForWorkspace,
   WorkspaceManager,
   WorkspaceRuntime,
@@ -68,6 +74,7 @@ import { instanceEventsRoutes } from "../routes/instance-events.ts";
 import { jobsRoutes } from "../routes/jobs.ts";
 import { linkRoutes } from "../routes/link.ts";
 import { mcpRegistryRouter } from "../routes/mcp-registry.ts";
+import { getCurrentUserId } from "../routes/me/adapter.ts";
 import { meRoutes } from "../routes/me/index.ts";
 import { memoryNarrativeRoutes } from "../routes/memory/index.ts";
 import reportRoutes from "../routes/report.ts";
@@ -1998,24 +2005,47 @@ export class AtlasDaemon {
      * spawned session records its parent. Phase 11 provenance.
      */
     parentSessionId?: string,
-  ): Promise<{
-    sessionId: string;
-    output: Array<{ id: string; type: string; data: Record<string, unknown> }>;
-    /**
-     * Phase 2.C — persisted artifact ids for this session's eligible
-     * outputs (Phase 2.B persisted them; this surfaces the ids so SSE
-     * `job-complete` consumers can prefer refs over the full
-     * `Document[]`). Empty when no eligible documents were emitted.
-     */
-    artifactIds: string[];
-    /**
-     * Phase 2.C — short session summary. Prefers the AI-generated
-     * `aiSummary.summary` and falls back to the terminal-state action's
-     * declared `summary` (Phase 2.A schema) or a truncated stringify of
-     * the terminal output's `data`. Empty when nothing's summarizable.
-     */
-    summary: string;
-  }> {
+  ): Promise<
+    | {
+        sessionId: string;
+        output: Array<{ id: string; type: string; data: Record<string, unknown> }>;
+        /**
+         * Phase 2.C — persisted artifact ids for this session's eligible
+         * outputs (Phase 2.B persisted them; this surfaces the ids so SSE
+         * `job-complete` consumers can prefer refs over the full
+         * `Document[]`). Empty when no eligible documents were emitted.
+         */
+        artifactIds: string[];
+        /**
+         * Phase 2.C — short session summary. Prefers the AI-generated
+         * `aiSummary.summary` and falls back to the terminal-state action's
+         * declared `summary` (Phase 2.A schema) or a truncated stringify of
+         * the terminal output's `data`. Empty when nothing's summarizable.
+         */
+        summary: string;
+      }
+    | { skipped: true; reason: "setup_required" }
+  > {
+    // Setup gate: short-circuit cascade-dispatched signals before any runtime
+    // or session is constructed. Belt-and-suspenders with the chat-path gate
+    // in `getOrCreateWorkspaceRuntime` (task #14). See design doc § 5(b).
+    const manager = this.getWorkspaceManager();
+    const config = await manager.getWorkspaceConfig(workspaceId);
+    if (config) {
+      const userId = (await getCurrentUserId()) ?? "daemon";
+      const status = await resolveWorkspaceSetupRequirements(
+        config.workspace,
+        buildSetupResolveDeps(userId),
+      );
+      if (status.requires_setup) {
+        logger.info("Skipping signal trigger — workspace requires setup", {
+          workspaceId,
+          signalId,
+        });
+        return { skipped: true, reason: "setup_required" };
+      }
+    }
+
     const runtime = await this.getOrCreateWorkspaceRuntime(workspaceId);
 
     const result = await runtime.triggerSignalWithResult(
@@ -2034,7 +2064,6 @@ export class AtlasDaemon {
     AtlasMetrics.recordSignalTrigger(signalProvider);
 
     try {
-      const manager = this.getWorkspaceManager();
       await manager.updateWorkspaceLastSeen(runtime.workspaceId);
     } catch (error) {
       logger.warn("Failed to update lastSeen for workspace", {
@@ -3028,4 +3057,46 @@ export class AtlasDaemon {
       });
     }
   }
+}
+
+/**
+ * Daemon-side adapter wiring `resolveWorkspaceSetupRequirements`'s `ResolveDeps`
+ * onto the existing Link HTTP client. The Link service authenticates the
+ * daemon via `FRIDAY_KEY` (or skips auth in `LINK_DEV_MODE`) and resolves the
+ * caller's user-scoped credentials from that — so `userId` is informational
+ * here and not threaded into the HTTP call. Errors (no credentials, unknown
+ * provider) collapse to "no default" / empty list so the gate treats absence
+ * of credentials as setup-required rather than failing the whole signal.
+ */
+function buildSetupResolveDeps(userId: string): ResolveDeps {
+  return {
+    userId,
+    getDefaultByProvider: async (provider) => {
+      try {
+        const summaries = await resolveCredentialsByProvider(provider);
+        const def = summaries.find((s) => s.isDefault);
+        return def ? { id: def.id } : null;
+      } catch {
+        return null;
+      }
+    },
+    listByProvider: async (provider) => {
+      try {
+        const summaries = await resolveCredentialsByProvider(provider);
+        return summaries.map(toCredentialOption);
+      } catch {
+        return [];
+      }
+    },
+  };
+}
+
+function toCredentialOption(s: CredentialSummary) {
+  return {
+    id: s.id,
+    label: s.label,
+    displayName: s.displayName,
+    userIdentifier: s.userIdentifier,
+    isDefault: s.isDefault,
+  };
 }

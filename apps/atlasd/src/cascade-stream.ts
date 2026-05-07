@@ -150,29 +150,36 @@ export async function publishCascade(
  * throws `SessionFailedError` for domain-level failures (LLM error,
  * tool error) and other Errors for infra-level failures.
  *
+ * Returns the `setup_required` sentinel when the workspace's setup gate
+ * short-circuits the dispatch — no session is created in that case.
+ *
  * `abortSignal` is wired to the runtime via `triggerSignalWithSession`'s
  * existing 6th arg — the `replace` policy uses it to cancel an
  * in-flight cascade in favour of a newer envelope.
  */
+export type CascadeDispatchResult =
+  | {
+      sessionId: string;
+      output: Array<{ id: string; type: string; data: Record<string, unknown> }>;
+      /**
+       * Phase 2.C — persisted artifact ids (Phase 2.B), forwarded onto the
+       * SSE `job-complete` event so supervisor consumers can prefer refs
+       * over the full `Document[]`. Empty when no eligible documents.
+       */
+      artifactIds: string[];
+      /**
+       * Phase 2.C — short session summary (AI-generated or synthesized
+       * from the terminal-state action's declared `summary` / output
+       * data). Empty when nothing is summarizable.
+       */
+      summary: string;
+    }
+  | { skipped: true; reason: "setup_required" };
+
 export type CascadeDispatcher = (
   envelope: SignalEnvelope,
   ctx: { onStreamEvent?: (chunk: AtlasUIMessageChunk) => void; abortSignal: AbortSignal },
-) => Promise<{
-  sessionId: string;
-  output: Array<{ id: string; type: string; data: Record<string, unknown> }>;
-  /**
-   * Phase 2.C — persisted artifact ids (Phase 2.B), forwarded onto the
-   * SSE `job-complete` event so supervisor consumers can prefer refs
-   * over the full `Document[]`. Empty when no eligible documents.
-   */
-  artifactIds: string[];
-  /**
-   * Phase 2.C — short session summary (AI-generated or synthesized
-   * from the terminal-state action's declared `summary` / output
-   * data). Empty when nothing is summarizable.
-   */
-  summary: string;
-}>;
+) => Promise<CascadeDispatchResult>;
 
 /**
  * Read the per-signal concurrency policy from workspace.yml. Injected
@@ -619,24 +626,32 @@ export class CascadeConsumer {
           onStreamEvent,
           abortSignal: controller.signal,
         });
-        cascade.sessionId = result.sessionId;
-        // One `cascade.replaced` event per cancelled cascade. Steady-
-        // state replace cancels at most one, but if a `concurrent`-then-
-        // `replace` switch produced N, surface each cancellation.
-        for (const cancelled of replacedExisting) {
-          if (!cancelled.sessionId) continue;
-          const ev: CascadeReplacedEvent = {
-            type: "cascade.replaced",
-            at: new Date().toISOString(),
-            workspaceId: envelope.workspaceId,
-            signalId: envelope.signalId,
-            cancelledSessionId: cancelled.sessionId,
-            newSessionId: result.sessionId,
-          };
-          await publishInstanceEvent(this.nc, ev, logger);
-        }
-        if (envelope.correlationId) {
-          this.publishResponse(envelope.correlationId, { ok: true, result });
+        if ("skipped" in result) {
+          // No session was created — surface the sentinel on the response
+          // subject so synchronous publishers unblock, then exit.
+          if (envelope.correlationId) {
+            this.publishResponse(envelope.correlationId, { ok: true, result });
+          }
+        } else {
+          cascade.sessionId = result.sessionId;
+          // One `cascade.replaced` event per cancelled cascade. Steady-
+          // state replace cancels at most one, but if a `concurrent`-then-
+          // `replace` switch produced N, surface each cancellation.
+          for (const cancelled of replacedExisting) {
+            if (!cancelled.sessionId) continue;
+            const ev: CascadeReplacedEvent = {
+              type: "cascade.replaced",
+              at: new Date().toISOString(),
+              workspaceId: envelope.workspaceId,
+              signalId: envelope.signalId,
+              cancelledSessionId: cancelled.sessionId,
+              newSessionId: result.sessionId,
+            };
+            await publishInstanceEvent(this.nc, ev, logger);
+          }
+          if (envelope.correlationId) {
+            this.publishResponse(envelope.correlationId, { ok: true, result });
+          }
         }
       } catch (err) {
         const msg = stringifyError(err);
