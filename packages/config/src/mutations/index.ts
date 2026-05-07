@@ -79,3 +79,5 @@ export type {
 // Workspace-level agent extraction
 export type { WorkspaceAgent } from "./workspace-agents.ts";
 export { deriveWorkspaceAgents } from "./workspace-agents.ts";
+// workspace_config mutations
+export { setWorkspaceConfigValues } from "./workspace-config.ts";

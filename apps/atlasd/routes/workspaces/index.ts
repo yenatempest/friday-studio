@@ -1385,6 +1385,68 @@ const workspacesRoutes = daemonFactory
       }
     },
   )
+  // Setup Completion: write user-supplied workspace_config values into YAML.
+  // Single endpoint for finishing or re-editing setup. Credential pinning and
+  // JSON-Schema value validation are separate follow-ups.
+  .post(
+    "/:workspaceId/setup",
+    zValidator("param", z.object({ workspaceId: z.string() })),
+    zValidator("json", z.object({ workspaceConfigValues: z.record(z.string(), z.string()) })),
+    async (c) => {
+      const { workspaceId } = c.req.valid("param");
+      const { workspaceConfigValues } = c.req.valid("json");
+      const ctx = c.get("app");
+
+      const manager = ctx.getWorkspaceManager();
+      const workspace = await manager.find({ id: workspaceId });
+      if (!workspace) {
+        return c.json(
+          { success: false, error: "not_found", entityType: "workspace", entityId: workspaceId },
+          404,
+        );
+      }
+
+      const merged = await manager.getWorkspaceConfig(workspace.id);
+      if (!merged) {
+        return c.json(
+          { success: false, error: "write", message: "Failed to load workspace configuration" },
+          500,
+        );
+      }
+
+      const declared = merged.workspace.workspace_config ?? {};
+      const missingKeys = Object.keys(declared).filter((key) => {
+        if (key in workspaceConfigValues) return false;
+        const existing = declared[key]?.value;
+        return existing === undefined || existing === null;
+      });
+      if (missingKeys.length > 0) {
+        return c.json(
+          {
+            success: false,
+            error: "validation",
+            message: "Missing required workspace_config values",
+            missingKeys,
+          },
+          400,
+        );
+      }
+
+      const mutationResult = await applyMutation(workspace.path, (config) =>
+        setWorkspaceConfigValues(config, workspaceConfigValues),
+      );
+      if (!mutationResult.ok) {
+        return mapMutationError(c, mutationResult.error, "Setup completion conflicted");
+      }
+
+      // Synchronously restart signals to close the watcher race. The file
+      // watcher will also fire on the YAML write; its later invocation is
+      // idempotent (unregister-then-register).
+      await manager.handleWorkspaceConfigChange(workspace, workspace.configPath);
+
+      return c.json({ success: true }, 200);
+    },
+  )
   // Complete workspace setup (verify all credentials are connected)
   .post(
     "/:workspaceId/setup/complete",
