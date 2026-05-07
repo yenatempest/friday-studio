@@ -71,6 +71,9 @@
   /** Edit page is full-screen editor — no sidebar. */
   const isEdit = $derived(page.route.id === "/platform/[workspaceId]/edit");
 
+  /** Setup page mirrors the overview header — no sidebar. */
+  const isSetup = $derived(page.route.id === "/platform/[workspaceId]/setup");
+
   /** Chat page is full-width — no sidebar. The chat page manages its own
    * scroll, so we disable layout scrolling for it. Sub-routes under /chat
    * (like /chat/[[chatId]]/debug) want normal layout scroll, so we match
@@ -143,7 +146,7 @@
   <Page.Content scrollable={!isChat} padded={false}>
     {@render children?.()}
   </Page.Content>
-  {#if !isSessionDetail && !isSignalDetail && !isOverview && !isEdit && !isChat && !isChatDebug}
+  {#if !isSessionDetail && !isSignalDetail && !isOverview && !isEdit && !isSetup && !isChat && !isChatDebug}
     <Page.Sidebar>
       {#if isAgents}
         <AgentIndexSidebar agents={workspaceAgents} {providerStatus} />
