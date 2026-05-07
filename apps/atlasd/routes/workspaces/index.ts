@@ -46,7 +46,10 @@ import { createLogger, logger } from "@atlas/logger";
 import { createMCPTools } from "@atlas/mcp";
 import { resolveVisibleSkills, SkillStorage } from "@atlas/skills";
 import { FilesystemWorkspaceCreationAdapter } from "@atlas/storage";
-import { resolveConfigOnlySetupRequirements } from "@atlas/workspace";
+import {
+  resolveConfigOnlySetupRequirements,
+  resolveWorkspaceSetupRequirements,
+} from "@atlas/workspace";
 import { ColorSchema, isErrnoException, stringifyError } from "@atlas/utils";
 import { getFridayHome } from "@atlas/utils/paths.server";
 import { zValidator } from "@hono/zod-validator";
@@ -63,8 +66,9 @@ import {
   setCommunicatorMutation,
   wireCommunicator,
 } from "../../src/services/communicator-wiring.ts";
+import { buildSetupResolveDeps } from "../../src/setup-resolve-deps.ts";
 import { awaitSignalCompletion } from "../../src/signal-stream.ts";
-import { getCurrentUser } from "../me/adapter.ts";
+import { getCurrentUser, getCurrentUserId } from "../me/adapter.ts";
 import {
   buildWorkspaceBundleBytes,
   isOnDiskWorkspace,
@@ -125,7 +129,10 @@ function isTestMode(): boolean {
 async function validateImportedWorkspace(
   targetDir: string,
   ctx: ValidationContext,
-): Promise<{ ok: true } | { ok: false; status: number; body: Record<string, unknown> }> {
+): Promise<
+  | { ok: true; config: WorkspaceConfig }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
   const workspaceYmlPath = join(targetDir, "workspace.yml");
   const workspaceYmlRaw = await readFile(workspaceYmlPath, "utf-8");
   const workspaceYmlParsed = parse(workspaceYmlRaw);
@@ -146,7 +153,7 @@ async function validateImportedWorkspace(
   if (report.status === "hard_fail") {
     return { ok: false, status: 422, body: { success: false, error: "validation_failed", report } };
   }
-  return { ok: true };
+  return { ok: true, config: validationResult.data };
 }
 
 function buildValidationContext(app: AppContext): ValidationContext {
@@ -1131,6 +1138,17 @@ const workspacesRoutes = daemonFactory
         return c.json(validation.body, validation.status as 400 | 422 | 500);
       }
 
+      // Derive setup status from the parsed bundle config. Async helper so
+      // Credential Requirements (provider-only refs with no Link default) are
+      // surfaced alongside Config Requirements. Per design § 7, the bundle
+      // YAML is written as supplied — no auto-pin upstream — so the helper
+      // sees provider-only refs exactly as the author shipped them.
+      const userId = (await getCurrentUserId()) ?? "daemon";
+      const setupStatus = await resolveWorkspaceSetupRequirements(
+        validation.config,
+        buildSetupResolveDeps(userId),
+      );
+
       const manager = ctx.getWorkspaceManager();
       const registered = await manager.registerWorkspace(targetDir, {
         name: result.lockfile.workspace.name,
@@ -1151,6 +1169,10 @@ const workspacesRoutes = daemonFactory
         name: result.lockfile.workspace.name,
         primitives: result.primitives,
         memory,
+        setupRequired: setupStatus.requires_setup,
+        ...(setupStatus.setup_requirements
+          ? { setup_requirements: setupStatus.setup_requirements }
+          : {}),
       });
     } catch (error) {
       const errorMessage = stringifyError(error);

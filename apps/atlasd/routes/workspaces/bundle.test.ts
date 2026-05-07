@@ -13,13 +13,16 @@ import { workspacesRoutes } from "./index.ts";
 vi.mock("@atlas/storage", () => ({ FilesystemWorkspaceCreationAdapter: vi.fn() }));
 
 const mockFetchLinkCredential = vi.hoisted(() => vi.fn());
+const mockResolveCredentialsByProvider = vi.hoisted(() => vi.fn());
 vi.mock("@atlas/core/mcp-registry/credential-resolver", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@atlas/core/mcp-registry/credential-resolver")>()),
   fetchLinkCredential: mockFetchLinkCredential,
+  resolveCredentialsByProvider: mockResolveCredentialsByProvider,
 }));
 
 vi.mock("../me/adapter.ts", () => ({
   getCurrentUser: vi.fn().mockResolvedValue({ id: "user-1", email: "test@test.com" }),
+  getCurrentUserId: vi.fn().mockResolvedValue("user-1"),
 }));
 
 const mockGetAtlasHome = vi.hoisted(() => vi.fn(() => "/tmp"));
@@ -46,6 +49,7 @@ function createApp(opts: {
   homeDir: string;
   registeredWorkspace?: { id: string; name: string; path: string };
   workspaceConfigBlock?: Record<string, Record<string, unknown>>;
+  mcpServersBlock?: Record<string, Record<string, unknown>>;
 }): { app: Hono<AppVariables>; registerSpy: ReturnType<typeof vi.fn> } {
   const workspaceId = opts.workspaceId ?? "ws-demo";
   const registerSpy = vi
@@ -66,6 +70,9 @@ function createApp(opts: {
   };
   if (opts.workspaceConfigBlock) {
     workspaceConfig.workspace_config = opts.workspaceConfigBlock;
+  }
+  if (opts.mcpServersBlock) {
+    workspaceConfig.tools = { mcp: { servers: opts.mcpServersBlock } };
   }
 
   const mockManager = {
@@ -131,6 +138,7 @@ describe("workspace bundle endpoints (end-to-end)", () => {
     homeDir = await mkdtemp(join(tmpdir(), "bundle-route-home-"));
     await seedWorkspaceDir(workspaceDir);
     mockFetchLinkCredential.mockReset();
+    mockResolveCredentialsByProvider.mockReset();
   });
 
   afterEach(async () => {
@@ -182,10 +190,14 @@ describe("workspace bundle endpoints (end-to-end)", () => {
       workspaceId: string;
       path: string;
       primitives: { kind: string; name: string }[];
+      setupRequired: boolean;
+      setup_requirements?: unknown;
     };
     expect(body.workspaceId).toBe("ws-new");
     expect(body.path).toContain(homeDir);
     expect(body.primitives).toEqual([{ kind: "skill", name: "hello", path: "skills/hello" }]);
+    expect(body.setupRequired).toBe(false);
+    expect(body.setup_requirements).toBeUndefined();
 
     expect(registerSpy).toHaveBeenCalledTimes(1);
     const registeredPath = registerSpy.mock.calls[0]?.[0] as string;
@@ -247,5 +259,188 @@ describe("workspace bundle endpoints (end-to-end)", () => {
     // Original values must not leak into the bundled YAML in any form.
     expect(yml).not.toContain("alice@example.com");
     expect(yml).not.toContain("casual");
+  });
+
+  // ===========================================================================
+  // POST /import-bundle — setupRequired payload
+  // ===========================================================================
+
+  test("POST /import-bundle returns setupRequired: true with configKeys when bundle has unfilled workspace_config", async () => {
+    const { app: exportApp } = createApp({
+      workspaceDir,
+      homeDir,
+      workspaceConfigBlock: {
+        // Author shipped a declaration; recipient must fill it in.
+        email_recipient: { description: "Where alerts are sent" },
+      },
+    });
+    const exportResponse = await exportApp.request("/ws-demo/bundle");
+    const zipBytes = new Uint8Array(await exportResponse.arrayBuffer());
+
+    const { app: importApp } = createApp({
+      workspaceDir,
+      homeDir,
+      registeredWorkspace: { id: "ws-new", name: "demo-space", path: join(homeDir, "imported") },
+    });
+    const form = new FormData();
+    form.set("bundle", new File([zipBytes], "demo.zip", { type: "application/zip" }));
+    const importResponse = await importApp.request("/import-bundle", {
+      method: "POST",
+      body: form,
+    });
+
+    expect(importResponse.status).toBe(200);
+    const body = (await importResponse.json()) as {
+      setupRequired: boolean;
+      setup_requirements?: { configKeys?: Array<{ key: string; description?: string }> };
+    };
+    expect(body.setupRequired).toBe(true);
+    expect(body.setup_requirements?.configKeys).toEqual([
+      { key: "email_recipient", description: "Where alerts are sent" },
+    ]);
+  });
+
+  test("POST /import-bundle returns setupRequired: true with credentials when Link has no default", async () => {
+    // Bundle ships a provider-only credential ref. Link returns no credentials
+    // for that provider — adapter swallows the error to `[]`, helper emits a
+    // Credential Requirement. Mirrors the rtx-price-monitor case where gmail
+    // is referenced but never connected.
+    mockResolveCredentialsByProvider.mockRejectedValue(new Error("no credentials"));
+    const { app: exportApp } = createApp({
+      workspaceDir,
+      homeDir,
+      mcpServersBlock: {
+        gmail: {
+          transport: { type: "stdio", command: "echo" },
+          env: {
+            GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" },
+          },
+        },
+      },
+    });
+    const exportResponse = await exportApp.request("/ws-demo/bundle");
+    const zipBytes = new Uint8Array(await exportResponse.arrayBuffer());
+
+    const { app: importApp } = createApp({
+      workspaceDir,
+      homeDir,
+      registeredWorkspace: { id: "ws-new", name: "demo-space", path: join(homeDir, "imported") },
+    });
+    const form = new FormData();
+    form.set("bundle", new File([zipBytes], "demo.zip", { type: "application/zip" }));
+    const importResponse = await importApp.request("/import-bundle", {
+      method: "POST",
+      body: form,
+    });
+
+    expect(importResponse.status).toBe(200);
+    const body = (await importResponse.json()) as {
+      setupRequired: boolean;
+      setup_requirements?: { credentials?: Array<{ provider: string }> };
+    };
+    expect(body.setupRequired).toBe(true);
+    expect(body.setup_requirements?.credentials).toEqual([
+      expect.objectContaining({ provider: "google-gmail" }),
+    ]);
+  });
+
+  test("POST /import-bundle returns setupRequired: false when Link has a default for every provider", async () => {
+    // Migration-safe path: an existing user has the credential auto-marked
+    // default in Link, so the import resolves cleanly without setup prompt.
+    mockResolveCredentialsByProvider.mockResolvedValue([
+      {
+        id: "cred-1",
+        provider: "google-gmail",
+        label: "alice@example.com",
+        type: "oauth",
+        displayName: "Alice",
+        userIdentifier: "alice@example.com",
+        isDefault: true,
+      },
+    ]);
+    const { app: exportApp } = createApp({
+      workspaceDir,
+      homeDir,
+      mcpServersBlock: {
+        gmail: {
+          transport: { type: "stdio", command: "echo" },
+          env: {
+            GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" },
+          },
+        },
+      },
+    });
+    const exportResponse = await exportApp.request("/ws-demo/bundle");
+    const zipBytes = new Uint8Array(await exportResponse.arrayBuffer());
+
+    const { app: importApp } = createApp({
+      workspaceDir,
+      homeDir,
+      registeredWorkspace: { id: "ws-new", name: "demo-space", path: join(homeDir, "imported") },
+    });
+    const form = new FormData();
+    form.set("bundle", new File([zipBytes], "demo.zip", { type: "application/zip" }));
+    const importResponse = await importApp.request("/import-bundle", {
+      method: "POST",
+      body: form,
+    });
+
+    expect(importResponse.status).toBe(200);
+    const body = (await importResponse.json()) as {
+      setupRequired: boolean;
+      setup_requirements?: unknown;
+    };
+    expect(body.setupRequired).toBe(false);
+    expect(body.setup_requirements).toBeUndefined();
+  });
+
+  test("POST /import-bundle surfaces both config and credential Requirements together", async () => {
+    // The rtx-price-monitor canonical case: unfilled email + missing gmail.
+    mockResolveCredentialsByProvider.mockRejectedValue(new Error("no credentials"));
+    const { app: exportApp } = createApp({
+      workspaceDir,
+      homeDir,
+      workspaceConfigBlock: {
+        email_recipient: { description: "Where alerts are sent" },
+      },
+      mcpServersBlock: {
+        gmail: {
+          transport: { type: "stdio", command: "echo" },
+          env: {
+            GMAIL_TOKEN: { from: "link", provider: "google-gmail", key: "access_token" },
+          },
+        },
+      },
+    });
+    const exportResponse = await exportApp.request("/ws-demo/bundle");
+    const zipBytes = new Uint8Array(await exportResponse.arrayBuffer());
+
+    const { app: importApp } = createApp({
+      workspaceDir,
+      homeDir,
+      registeredWorkspace: { id: "ws-new", name: "demo-space", path: join(homeDir, "imported") },
+    });
+    const form = new FormData();
+    form.set("bundle", new File([zipBytes], "demo.zip", { type: "application/zip" }));
+    const importResponse = await importApp.request("/import-bundle", {
+      method: "POST",
+      body: form,
+    });
+
+    expect(importResponse.status).toBe(200);
+    const body = (await importResponse.json()) as {
+      setupRequired: boolean;
+      setup_requirements?: {
+        configKeys?: Array<{ key: string }>;
+        credentials?: Array<{ provider: string }>;
+      };
+    };
+    expect(body.setupRequired).toBe(true);
+    expect(body.setup_requirements?.configKeys).toEqual([
+      expect.objectContaining({ key: "email_recipient" }),
+    ]);
+    expect(body.setup_requirements?.credentials).toEqual([
+      expect.objectContaining({ provider: "google-gmail" }),
+    ]);
   });
 });

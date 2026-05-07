@@ -42,7 +42,6 @@ import { getFridayHome } from "@atlas/utils/paths.server";
 import {
   createJetStreamKVStorage,
   createRegistryStorageJS,
-  type ResolveDeps,
   resolveWorkspaceSetupRequirements,
   validateMCPEnvironmentForWorkspace,
   WorkspaceManager,
@@ -117,6 +116,7 @@ import { getAllMigrations } from "./migrations/index.ts";
 import { NatsManager } from "./nats-manager.ts";
 import { ProcessAgentExecutor } from "./process-agent-executor.ts";
 import { SessionStreamRegistry } from "./session-stream-registry.ts";
+import { buildSetupResolveDeps } from "./setup-resolve-deps.ts";
 import { CronSignalRegistrar } from "./signal-registrars/cron-registrar.ts";
 import { FsWatchSignalRegistrar } from "./signal-registrars/fs-watch-registrar.ts";
 import {
@@ -3079,44 +3079,3 @@ export class AtlasDaemon {
   }
 }
 
-/**
- * Daemon-side adapter wiring `resolveWorkspaceSetupRequirements`'s `ResolveDeps`
- * onto the existing Link HTTP client. The Link service authenticates the
- * daemon via `FRIDAY_KEY` (or skips auth in `LINK_DEV_MODE`) and resolves the
- * caller's user-scoped credentials from that — so `userId` is informational
- * here and not threaded into the HTTP call. Errors (no credentials, unknown
- * provider) collapse to "no default" / empty list so the gate treats absence
- * of credentials as setup-required rather than failing the whole signal.
- */
-function buildSetupResolveDeps(userId: string): ResolveDeps {
-  return {
-    userId,
-    getDefaultByProvider: async (provider) => {
-      try {
-        const summaries = await resolveCredentialsByProvider(provider);
-        const def = summaries.find((s) => s.isDefault);
-        return def ? { id: def.id } : null;
-      } catch {
-        return null;
-      }
-    },
-    listByProvider: async (provider) => {
-      try {
-        const summaries = await resolveCredentialsByProvider(provider);
-        return summaries.map(toCredentialOption);
-      } catch {
-        return [];
-      }
-    },
-  };
-}
-
-function toCredentialOption(s: CredentialSummary) {
-  return {
-    id: s.id,
-    label: s.label,
-    displayName: s.displayName,
-    userIdentifier: s.userIdentifier,
-    isDefault: s.isDefault,
-  };
-}
