@@ -113,6 +113,7 @@
       const result: unknown = await res.json();
       const parsed = z.object({
         workspace: z.object({ id: z.string() }),
+        setupRequired: z.boolean().optional(),
       }).passthrough().safeParse(result);
 
       if (!parsed.success) {
@@ -123,7 +124,9 @@
 
       onclose?.();
 
-      goto(`/platform/${parsed.success ? parsed.data.workspace.id : ""}`);
+      const newId = parsed.success ? parsed.data.workspace.id : "";
+      const setupRequired = parsed.success && parsed.data.setupRequired === true;
+      goto(setupRequired ? `/platform/${newId}/setup` : `/platform/${newId}`);
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to parse YAML";
     } finally {
