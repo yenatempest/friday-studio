@@ -1571,56 +1571,6 @@ const workspacesRoutes = daemonFactory
       return c.json({ success: true }, 200);
     },
   )
-  // Complete workspace setup (verify all credentials are connected)
-  .post(
-    "/:workspaceId/setup/complete",
-    zValidator("param", z.object({ workspaceId: z.string() })),
-    async (c) => {
-      const { workspaceId } = c.req.valid("param");
-      const ctx = c.get("app");
-
-      try {
-        const manager = ctx.getWorkspaceManager();
-        const workspace = await manager.find({ id: workspaceId });
-        if (!workspace) {
-          return c.json({ error: `Workspace not found: ${workspaceId}` }, 404);
-        }
-
-        const config = await manager.getWorkspaceConfig(workspace.id);
-        if (!config) {
-          return c.json({ error: "Failed to load workspace configuration" }, 500);
-        }
-
-        const credentials = extractCredentials(config.workspace);
-
-        // Group by provider and check each has a credentialId
-        const byProvider = new Map<string, boolean>();
-        for (const cred of credentials) {
-          if (!cred.provider) continue;
-          const currentlyConnected = byProvider.get(cred.provider) ?? true;
-          byProvider.set(cred.provider, currentlyConnected && !!cred.credentialId);
-        }
-
-        const missingProviders = [...byProvider.entries()]
-          .filter(([, connected]) => !connected)
-          .map(([provider]) => provider);
-
-        if (missingProviders.length > 0) {
-          return c.json({ error: "incomplete_setup", missingProviders }, 422);
-        }
-
-        // All credentials connected — clear requires_setup
-        const newMetadata = { ...workspace.metadata, requires_setup: false };
-        await manager.updateWorkspaceStatus(workspaceId, workspace.status, {
-          metadata: newMetadata,
-        });
-
-        return c.json({ ok: true }, 200);
-      } catch (error) {
-        return c.json({ error: `Failed to complete setup: ${stringifyError(error)}` }, 500);
-      }
-    },
-  )
   // Connect a communicator (slack/telegram/discord/teams/whatsapp) to a
   // workspace. Wires the credential to the workspace via Link's
   // communicator_wiring table (single source of truth for secrets) and adds

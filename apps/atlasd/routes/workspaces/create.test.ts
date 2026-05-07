@@ -1,9 +1,7 @@
 /**
- * Integration tests for POST /create (requires_setup flag) and
- * POST /:workspaceId/setup/complete endpoint.
+ * Integration tests for POST /create (requires_setup flag).
  *
- * Tests the create endpoint sets requires_setup when credentials can't resolve,
- * and the setup/complete endpoint verifies all credentials before clearing the flag.
+ * Tests the create endpoint sets requires_setup when credentials can't resolve.
  */
 
 import { createStubPlatformModels } from "@atlas/llm";
@@ -101,42 +99,6 @@ function configWithNoCredentials() {
       mcp: {
         servers: {
           myserver: { transport: { type: "stdio", command: "npx", args: ["-y", "some-server"] } },
-        },
-      },
-    },
-  };
-}
-
-/** Config where all credentials already have IDs (fully connected). */
-function configWithConnectedCredentials() {
-  return {
-    version: "1.0",
-    workspace: { name: "Test Workspace" },
-    tools: {
-      mcp: {
-        servers: {
-          github: {
-            transport: { type: "stdio", command: "npx", args: ["-y", "server-github"] },
-            env: { TOKEN: { from: "link", id: "cred-1", provider: "github", key: "access_token" } },
-          },
-        },
-      },
-    },
-  };
-}
-
-/** Config where some credentials are missing IDs. */
-function configWithMissingCredentials() {
-  return {
-    version: "1.0",
-    workspace: { name: "Test Workspace" },
-    tools: {
-      mcp: {
-        servers: {
-          github: {
-            transport: { type: "stdio", command: "npx", args: ["-y", "server-github"] },
-            env: { TOKEN: { from: "link", provider: "github", key: "access_token" } },
-          },
         },
       },
     },
@@ -460,74 +422,3 @@ describe("POST /create — setupRequired in response", () => {
   });
 });
 
-describe("POST /:workspaceId/setup/complete", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    mockResolveCredentialsByProvider.mockReset();
-    mockFetchLinkCredential.mockReset();
-    mockWriteFile.mockReset().mockResolvedValue(undefined);
-  });
-
-  test("returns 200 and clears requires_setup when all credentials are connected", async () => {
-    const { app, find, getWorkspaceConfig, updateWorkspaceStatus } = createTestApp();
-    await mountRoutes(app);
-
-    find.mockResolvedValue({
-      id: "ws-test-id",
-      name: "Test Workspace",
-      status: "inactive",
-      metadata: { requires_setup: true },
-    });
-    getWorkspaceConfig.mockResolvedValue({
-      atlas: null,
-      workspace: configWithConnectedCredentials(),
-    });
-
-    const response = await app.request("/ws-test-id/setup/complete", { method: "POST" });
-
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as JsonBody;
-    expect(body).toMatchObject({ ok: true });
-
-    expect(updateWorkspaceStatus).toHaveBeenCalledWith(
-      "ws-test-id",
-      "inactive",
-      expect.objectContaining({ metadata: expect.objectContaining({ requires_setup: false }) }),
-    );
-  });
-
-  test("returns 422 with missing providers when some credentials lack IDs", async () => {
-    const { app, find, getWorkspaceConfig, updateWorkspaceStatus } = createTestApp();
-    await mountRoutes(app);
-
-    find.mockResolvedValue({
-      id: "ws-test-id",
-      name: "Test Workspace",
-      status: "inactive",
-      metadata: { requires_setup: true },
-    });
-    getWorkspaceConfig.mockResolvedValue({
-      atlas: null,
-      workspace: configWithMissingCredentials(),
-    });
-
-    const response = await app.request("/ws-test-id/setup/complete", { method: "POST" });
-
-    expect(response.status).toBe(422);
-    const body = (await response.json()) as JsonBody;
-    expect(body).toMatchObject({ error: "incomplete_setup", missingProviders: ["github"] });
-
-    expect(updateWorkspaceStatus).not.toHaveBeenCalled();
-  });
-
-  test("returns 404 when workspace not found", async () => {
-    const { app, find } = createTestApp();
-    await mountRoutes(app);
-
-    find.mockResolvedValue(null);
-
-    const response = await app.request("/ws-nonexistent/setup/complete", { method: "POST" });
-
-    expect(response.status).toBe(404);
-  });
-});
