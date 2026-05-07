@@ -9,6 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AtlasDaemon } from "./atlas-daemon.ts";
 import { DiscordGatewayService } from "./discord-gateway-service.ts";
 
+const mockResolveCredentialsByProvider = vi.hoisted(() => vi.fn());
+vi.mock("@atlas/core/mcp-registry/credential-resolver", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@atlas/core/mcp-registry/credential-resolver")>()),
+  resolveCredentialsByProvider: mockResolveCredentialsByProvider,
+}));
+
 type WorkspaceManagerStub = {
   list: (...args: unknown[]) => Promise<{ id: string }[]>;
   getWorkspaceConfig: (
@@ -238,6 +244,10 @@ describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
     getOrCreateWorkspaceRuntime: (id: string) => Promise<unknown>;
   };
 
+  beforeEach(() => {
+    mockResolveCredentialsByProvider.mockReset();
+  });
+
   it("returns the setup_required sentinel without instantiating a runtime when workspace_config has unfilled entries", async () => {
     const daemon = new AtlasDaemon({ port: 0 });
     const runtimeSpy = vi.fn();
@@ -291,5 +301,47 @@ describe("AtlasDaemon.triggerWorkspaceSignal setup gate", () => {
 
     expect(result).toEqual({ sessionId: "session-1", output: [] });
     expect(triggerSignalWithSession).toHaveBeenCalledOnce();
+  });
+
+  it("returns the setup_required sentinel when a provider-only credential ref has no Link default", async () => {
+    // Empty result simulates "provider has zero credentials registered" — the
+    // resolver-side error path for `CredentialNotFoundError`. The daemon's
+    // adapter collapses both the empty-list AND the throw to "no default",
+    // so the helper produces a Credential Requirement and the gate trips.
+    mockResolveCredentialsByProvider.mockResolvedValue([]);
+
+    const daemon = new AtlasDaemon({ port: 0 });
+    const runtimeSpy = vi.fn();
+    const internals = daemon as unknown as DaemonInternals;
+    internals.workspaceManager = {
+      getWorkspaceConfig: vi.fn().mockResolvedValue({
+        atlas: null,
+        workspace: {
+          version: "1.0",
+          workspace: { name: "no-default-cred" },
+          // No workspace_config — config-keys side is satisfied. The only
+          // unmet requirement is the provider-only ref below.
+          tools: {
+            mcp: {
+              servers: {
+                github: {
+                  transport: { type: "stdio", command: "npx", args: ["-y", "server-github"] },
+                  env: {
+                    GITHUB_TOKEN: { from: "link", provider: "github", key: "token" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+    };
+    internals.getOrCreateWorkspaceRuntime = runtimeSpy;
+
+    const result = await daemon.triggerWorkspaceSignal("ws-no-default-cred", "any-signal");
+
+    expect(result).toEqual({ skipped: true, reason: "setup_required" });
+    expect(runtimeSpy).not.toHaveBeenCalled();
+    expect(mockResolveCredentialsByProvider).toHaveBeenCalledWith("github");
   });
 });
