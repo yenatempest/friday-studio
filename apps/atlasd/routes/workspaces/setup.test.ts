@@ -1,9 +1,9 @@
 /**
  * Integration tests for POST /:workspaceId/setup.
  *
- * Tests Setup Completion: writing user-supplied workspace_config values into
- * workspace.yml via a single applyMutation invocation. Credential pinning and
- * JSON-Schema validation are out of scope (see tasks #11, #12).
+ * Tests Setup Completion: writing user-supplied workspace_config values and
+ * credential `id` pins into workspace.yml via a single applyMutation invocation.
+ * JSON-Schema validation is out of scope (see task #12).
  *
  * NOTE: applyMutation strips YAML comments via @std/yaml — see task #26.
  * Tests assert structure preservation only.
@@ -13,6 +13,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkspaceConfig } from "@atlas/config";
+import { WorkspaceConfigSchema } from "@atlas/config";
 import { createStubPlatformModels } from "@atlas/llm";
 import type { WorkspaceManager } from "@atlas/workspace";
 import { parse, stringify } from "@std/yaml";
@@ -38,6 +39,36 @@ function baseConfig(): WorkspaceConfig {
       },
     },
   } as WorkspaceConfig;
+}
+
+function configWithGithubLinkRef(env: Record<string, unknown>): WorkspaceConfig {
+  // Parse through the schema so defaults (e.g. mcp.client_config) are filled
+  // in and the result is a fully-typed WorkspaceConfig — no `as` casts.
+  return WorkspaceConfigSchema.parse({
+    version: "1.0",
+    workspace: { id: "ws-test-id", name: "Test Workspace" },
+    workspace_config: {
+      api_key: { description: "API key", value: null },
+      region: { description: "Region", value: null },
+    },
+    signals: {
+      hourly: {
+        provider: "schedule",
+        description: "Hourly tick",
+        config: { schedule: "0 * * * *", timezone: "UTC" },
+      },
+    },
+    tools: {
+      mcp: {
+        servers: {
+          github: {
+            transport: { type: "stdio", command: "npx", args: ["-y", "server-github"] },
+            env,
+          },
+        },
+      },
+    },
+  });
 }
 
 function createFixture(options: {
@@ -289,6 +320,96 @@ describe("POST /:workspaceId/setup", () => {
     const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
     expect(written.workspace_config?.api_key?.value).toBe("second");
     expect(written.workspace_config?.region?.value).toBe("us-west-2");
+  });
+
+  test("writes credential `id` pins alongside config values in a single YAML write", async () => {
+    const initial = configWithGithubLinkRef({
+      GITHUB_TOKEN: { from: "link", provider: "github", key: "token" },
+    });
+    await writeFile(join(testDir, "workspace.yml"), stringify(initial));
+    const { app } = createFixture({ workspacePath: testDir, config: initial });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceConfigValues: { api_key: "secret-1", region: "us-west-2" },
+        credentialChoices: { "mcp:github:GITHUB_TOKEN": "cred_abc123" },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+
+    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    expect(written.workspace_config?.api_key?.value).toBe("secret-1");
+    expect(written.workspace_config?.region?.value).toBe("us-west-2");
+    const ref = written.tools?.mcp?.servers?.github?.env?.GITHUB_TOKEN;
+    expect(ref).toEqual({
+      from: "link",
+      id: "cred_abc123",
+      provider: "github",
+      key: "token",
+    });
+  });
+
+  test("returns 400 without writing when a required credential pin is missing", async () => {
+    const initial = configWithGithubLinkRef({
+      GITHUB_TOKEN: { from: "link", provider: "github", key: "token" },
+    });
+    const original = stringify(initial);
+    await writeFile(join(testDir, "workspace.yml"), original);
+    const { app } = createFixture({ workspacePath: testDir, config: initial });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceConfigValues: { api_key: "k", region: "r" },
+        // Note: no credentialChoices for the required github pin.
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as JsonBody;
+    expect(body).toMatchObject({
+      success: false,
+      error: "validation",
+      missingCredentialPaths: ["mcp:github:GITHUB_TOKEN"],
+    });
+
+    const onDisk = await readFile(join(testDir, "workspace.yml"), "utf-8");
+    expect(onDisk).toBe(original);
+  });
+
+  test("accepts a credential pin for a ref that already has an `id` (opt-in override)", async () => {
+    const initial = configWithGithubLinkRef({
+      GITHUB_TOKEN: { from: "link", id: "cred_default", provider: "github", key: "token" },
+    });
+    await writeFile(join(testDir, "workspace.yml"), stringify(initial));
+    const { app } = createFixture({ workspacePath: testDir, config: initial });
+    await mountRoutes(app);
+
+    const response = await app.request("/ws-test-id/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceConfigValues: { api_key: "k", region: "r" },
+        credentialChoices: { "mcp:github:GITHUB_TOKEN": "cred_override" },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+
+    const written = parse(await readFile(join(testDir, "workspace.yml"), "utf-8")) as WorkspaceConfig;
+    const ref = written.tools?.mcp?.servers?.github?.env?.GITHUB_TOKEN;
+    expect(ref).toEqual({
+      from: "link",
+      id: "cred_override",
+      provider: "github",
+      key: "token",
+    });
   });
 
   test("calls handleWorkspaceConfigChange after successful write", async () => {

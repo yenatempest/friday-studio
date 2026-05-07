@@ -19,6 +19,7 @@ import {
   stripCredentialRefs,
   toIdRefs,
   toProviderRefs,
+  updateCredential,
 } from "@atlas/config/mutations";
 import {
   MissingEnvironmentError,
@@ -1433,16 +1434,22 @@ const workspacesRoutes = daemonFactory
       }
     },
   )
-  // Setup Completion: write user-supplied workspace_config values into YAML.
-  // Single endpoint for finishing or re-editing setup. Credential pinning and
-  // JSON-Schema value validation are separate follow-ups.
+  // Setup Completion: write user-supplied workspace_config values and credential
+  // pin choices into YAML. Single endpoint for finishing or re-editing setup.
+  // JSON-Schema value validation is a separate follow-up (#12).
   .post(
     "/:workspaceId/setup",
     zValidator("param", z.object({ workspaceId: z.string() })),
-    zValidator("json", z.object({ workspaceConfigValues: z.record(z.string(), z.string()) })),
+    zValidator(
+      "json",
+      z.object({
+        workspaceConfigValues: z.record(z.string(), z.string()),
+        credentialChoices: z.record(z.string(), z.string()).optional(),
+      }),
+    ),
     async (c) => {
       const { workspaceId } = c.req.valid("param");
-      const { workspaceConfigValues } = c.req.valid("json");
+      const { workspaceConfigValues, credentialChoices = {} } = c.req.valid("json");
       const ctx = c.get("app");
 
       const manager = ctx.getWorkspaceManager();
@@ -1480,9 +1487,46 @@ const workspacesRoutes = daemonFactory
         );
       }
 
-      const mutationResult = await applyMutation(workspace.path, (config) =>
-        setWorkspaceConfigValues(config, workspaceConfigValues),
+      // A Credential Requirement is any link ref without an `id` pinned in YAML.
+      // It is satisfied either by an incoming `credentialChoices[path]` or by an
+      // `id` already present on the ref. Link-default fallback is intentionally
+      // not consulted here — keeping the mutation-time check independent of
+      // Link's runtime state. The ref-side check happens at runtime.
+      const usages = extractCredentials(merged.workspace);
+      const missingCredentialPaths = usages
+        .filter((u) => !u.credentialId && !(u.path in credentialChoices))
+        .map((u) => u.path);
+      if (missingCredentialPaths.length > 0) {
+        return c.json(
+          {
+            success: false,
+            error: "validation",
+            message: "Missing required credential pins",
+            missingCredentialPaths,
+          },
+          400,
+        );
+      }
+
+      // Preserve the existing ref's `provider` across the pin — `updateCredential`
+      // drops `provider` unless you re-supply it, and we don't want a setup
+      // submission to silently turn a provider-aware ref into an id-only one.
+      const providerByPath = new Map(
+        usages.filter((u) => u.provider !== undefined).map((u) => [u.path, u.provider]),
       );
+
+      const mutationResult = await applyMutation(workspace.path, (config) => {
+        const valuesResult = setWorkspaceConfigValues(config, workspaceConfigValues);
+        if (!valuesResult.ok) return valuesResult;
+
+        let next = valuesResult.value;
+        for (const [path, credentialId] of Object.entries(credentialChoices)) {
+          const credResult = updateCredential(next, path, credentialId, providerByPath.get(path));
+          if (!credResult.ok) return credResult;
+          next = credResult.value;
+        }
+        return { ok: true, value: next };
+      });
       if (!mutationResult.ok) {
         return mapMutationError(c, mutationResult.error, "Setup completion conflicted");
       }
