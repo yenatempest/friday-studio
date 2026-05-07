@@ -1,3 +1,4 @@
+import { JSONSchemaSchema } from "@atlas/schemas/json-schema";
 import { z } from "zod";
 import { WorkspaceAgentConfigSchema } from "./agents.ts";
 import { AtlasServerConfigSchema, PlatformModelsSchema, ServerConfigSchema } from "./atlas.ts";
@@ -112,6 +113,18 @@ export function parseMemoryMountSource(source: string): {
 }
 
 // ==============================================================================
+// WORKSPACE CONFIG ENTRY (workspace_config: block)
+// ==============================================================================
+
+export const WorkspaceConfigEntrySchema = z.strictObject({
+  description: z.string().optional(),
+  schema: JSONSchemaSchema.optional(),
+  value: z.unknown().nullable().optional(),
+});
+
+export type WorkspaceConfigEntry = z.infer<typeof WorkspaceConfigEntrySchema>;
+
+// ==============================================================================
 // WORKSPACE CONFIGURATION (workspace.yml)
 // ==============================================================================
 
@@ -186,6 +199,7 @@ export const WorkspaceConfigSchema = z.strictObject({
       ),
     })
     .optional(),
+  workspace_config: z.record(z.string(), WorkspaceConfigEntrySchema).optional(),
 });
 
 export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>;
