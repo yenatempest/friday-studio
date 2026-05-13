@@ -76,20 +76,18 @@
 
   async function handleInstall(registryName: string): Promise<void> {
     try {
-      await installMut.mutateAsync({ registryName });
+      const { server } = await installMut.mutateAsync({ registryName });
       importDialogOpen = false;
       toast({
         title: "MCP server installed",
         description: `${registryName} has been added to your catalog.`,
       });
-      // After install, navigate to the newly installed server
-      const freshCatalog = await catalogQuery.refetch();
-      const installed = freshCatalog.data?.servers.find(
-        (s) => s.upstream?.canonicalName === registryName,
-      );
-      if (installed) {
-        goto(`/mcp/${installed.id}`);
-      }
+      // Wait for the catalog cache to include the new server before navigating
+      // so `selectedServer` resolves on first render instead of briefly
+      // flashing the empty state while the invalidate-driven refetch is in
+      // flight.
+      await catalogQuery.refetch();
+      goto(`/mcp/${server.id}`);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       toast({ title: "Install failed", description: message, error: true });
