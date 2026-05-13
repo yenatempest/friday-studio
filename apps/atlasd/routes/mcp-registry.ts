@@ -9,6 +9,7 @@ import {
 } from "@atlas/core/mcp-registry/official-servers";
 import { fetchReadme } from "@atlas/core/mcp-registry/readme-fetcher";
 import { mcpServersRegistry } from "@atlas/core/mcp-registry/registry-consolidated";
+import { resolveRegistryRepoUrl } from "@atlas/core/mcp-registry/repo-url-resolver";
 import { type MCPServerMetadata, MCPServerMetadataSchema } from "@atlas/core/mcp-registry/schemas";
 import { getMCPRegistryAdapter } from "@atlas/core/mcp-registry/storage";
 import {
@@ -250,7 +251,7 @@ export const mcpRegistryRouter = daemonFactory
           version: entry.server.version,
           alreadyInstalled: installedCanonicalNames.has(entry.server.name),
           isOfficial: isOfficialCanonicalName(entry.server.name),
-          repositoryUrl: entry.server.repository?.url ?? null,
+          repositoryUrl: resolveRegistryRepoUrl(entry.server),
         };
       });
 
@@ -314,9 +315,10 @@ export const mcpRegistryRouter = daemonFactory
 
       // Fetch README from the upstream repository (best-effort, non-blocking on failure).
       // Truncate to 30 KB to stay within Deno KV's 64 KB atomic-write limit.
-      const repoUrl = upstreamEntry.server.repository?.url;
+      const repoUrl = resolveRegistryRepoUrl(upstreamEntry.server);
       const subfolder = upstreamEntry.server.repository?.subfolder;
       if (repoUrl) {
+        if (entry.upstream) entry.upstream.repositoryUrl = repoUrl;
         try {
           const readme = await fetchReadme(repoUrl, subfolder);
           if (readme) {
@@ -572,10 +574,13 @@ export const mcpRegistryRouter = daemonFactory
         // Update all fields except id and source per adapter contract
         const { id: _newId, source: _newSource, ...updatableFields } = translateResult.entry;
 
-        // Re-fetch README on update (best-effort)
-        const repoUrl = upstreamEntry.server.repository?.url;
+        // Re-fetch README on update (best-effort). Lazy backfill of repositoryUrl
+        // happens here too — entries installed before the resolver landed get
+        // their inferred URL written on the next update tick.
+        const repoUrl = resolveRegistryRepoUrl(upstreamEntry.server);
         const subfolder = upstreamEntry.server.repository?.subfolder;
         if (repoUrl) {
+          if (updatableFields.upstream) updatableFields.upstream.repositoryUrl = repoUrl;
           try {
             const readme = await fetchReadme(repoUrl, subfolder);
             if (readme) {

@@ -38,6 +38,7 @@
     "./mcp-registry/auth-config": "./src/mcp-registry/auth-config.ts",
     "./mcp-registry/translator": "./src/mcp-registry/translator.ts",
     "./mcp-registry/readme-fetcher": "./src/mcp-registry/readme-fetcher.ts",
+    "./mcp-registry/repo-url-resolver": "./src/mcp-registry/repo-url-resolver.ts",
     "./mcp-registry/workspace-mcp": "./src/mcp-registry/workspace-mcp.ts",
     "./mcp-registry/config-validator": "./src/mcp-registry/config-validator.ts",
     "./mcp-registry/custom-parser": "./src/mcp-registry/custom-parser.ts",

@@ -34,6 +34,12 @@ export const MCPUpstreamProvenanceSchema = z.object({
   canonicalName: z.string(),
   version: z.string(),
   updatedAt: z.string(),
+  /**
+   * Source-repository URL resolved at install/update time. Optional so
+   * entries written before the resolver landed remain valid; the field
+   * populates lazily on the next update tick. See `repo-url-resolver.ts`.
+   */
+  repositoryUrl: z.string().optional(),
 });
 export type MCPUpstreamProvenance = z.infer<typeof MCPUpstreamProvenanceSchema>;
 

@@ -303,6 +303,25 @@
                     >{formatDate(server.upstream.updatedAt)}</span
                   >
                 </div>
+                {#if server.upstream.repositoryUrl}
+                  <div class="meta-item">
+                    <span class="meta-label">Repository</span>
+                    <span class="meta-value">
+                      <Button
+                        variant="secondary"
+                        size="small"
+                        href={server.upstream.repositoryUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {#snippet prepend()}
+                          <IconSmall.ExternalLink />
+                        {/snippet}
+                        View on GitHub
+                      </Button>
+                    </span>
+                  </div>
+                {/if}
               </div>
             </div>
           {/if}

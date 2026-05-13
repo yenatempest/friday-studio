@@ -113,6 +113,25 @@ const { _resetCacheForTest, _flushPrewarmsForTest, _setRaceCapForTest } = await 
   "./mcp-tool-cache.ts"
 );
 
+/**
+ * Filter a fetch-spy's calls down to Link provider POSTs. Install now also
+ * fetches README from raw.githubusercontent.com when the resolver returns a
+ * URL, so we can't rely on global call counts to assert Link behaviour.
+ */
+function linkProviderCalls(
+  spy: ReturnType<typeof vi.spyOn<typeof globalThis, "fetch">>,
+): Array<[URL | RequestInfo, RequestInit | undefined]> {
+  return spy.mock.calls.filter(([input]) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+    return url.includes("/v1/providers");
+  });
+}
+
 /** Build a Hono app that wraps the MCP registry router with a partial mock app context. */
 function createWrappedRouter(context: Record<string, unknown>) {
   const app = new Hono();
@@ -790,8 +809,9 @@ describe("MCP Registry Routes", () => {
       const body = InstallResponseSchema.parse(await res.json());
       expect(body.warning).toBeUndefined();
 
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      const [url, init] = fetchSpy.mock.calls[0]!;
+      const linkCalls = linkProviderCalls(fetchSpy);
+      expect(linkCalls).toHaveLength(1);
+      const [url, init] = linkCalls[0]!;
       expect(url).toBe("http://localhost:3100/v1/providers");
       expect(init?.method).toBe("POST");
       if (!init || typeof init.body !== "string") throw new Error("expected string body");
@@ -874,7 +894,7 @@ describe("MCP Registry Routes", () => {
       });
 
       expect(res.status).toBe(201);
-      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(linkProviderCalls(fetchSpy)).toHaveLength(0);
 
       fetchSpy.mockRestore();
     });
@@ -911,8 +931,9 @@ describe("MCP Registry Routes", () => {
       expect(body.warning).toBeUndefined();
 
       // Verify Link call was made with apikey provider
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      const [, init] = fetchSpy.mock.calls[0]!;
+      const linkCalls = linkProviderCalls(fetchSpy);
+      expect(linkCalls).toHaveLength(1);
+      const [, init] = linkCalls[0]!;
       expect(init?.method).toBe("POST");
       if (!init || typeof init.body !== "string") throw new Error("expected string body");
       const requestBody = z
@@ -959,8 +980,9 @@ describe("MCP Registry Routes", () => {
       expect(body.warning).toBeUndefined();
 
       // Verify Link call was made with oauth provider in discovery mode
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      const [, init] = fetchSpy.mock.calls[0]!;
+      const linkCalls = linkProviderCalls(fetchSpy);
+      expect(linkCalls).toHaveLength(1);
+      const [, init] = linkCalls[0]!;
       expect(init?.method).toBe("POST");
       if (!init || typeof init.body !== "string") throw new Error("expected string body");
       const requestBody = z
@@ -1023,8 +1045,9 @@ describe("MCP Registry Routes", () => {
       expect(body.warning).toBeUndefined();
 
       // Verify Link call was made with apikey provider
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      const [, init] = fetchSpy.mock.calls[0]!;
+      const linkCalls = linkProviderCalls(fetchSpy);
+      expect(linkCalls).toHaveLength(1);
+      const [, init] = linkCalls[0]!;
       expect(init?.method).toBe("POST");
       if (!init || typeof init.body !== "string") throw new Error("expected string body");
       const requestBody = z
@@ -1086,6 +1109,122 @@ describe("MCP Registry Routes", () => {
       expect(persisted?.configTemplate.env).toEqual({
         API_KEY: { from: "link", provider: "io-github-test-partial-fail", key: "API_KEY" },
       });
+
+      fetchSpy.mockRestore();
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Repository URL fallback: io.github.OWNER/REPO inference + README fetch
+    // ═══════════════════════════════════════════════════════════════════════
+
+    it("persists inferred GitHub URL and fetches README when upstream lacks repository field", async () => {
+      const canonicalName = "io.github.MatanYemini/bitbucket-mcp";
+      const inferredRepoUrl = "https://github.com/MatanYemini/bitbucket-mcp";
+      const readmeUrl = `https://raw.githubusercontent.com/MatanYemini/bitbucket-mcp/main/README.md`;
+      const readmeContent = "# Bitbucket MCP\n\nA Bitbucket MCP server.";
+
+      const upstreamEntry = createNpmStdioUpstreamEntry(canonicalName, "1.0.0");
+      // No repository field — install path must fall back to name-based inference.
+      expect(upstreamEntry.server.repository).toBeUndefined();
+      mockFetchLatest.mockResolvedValue(upstreamEntry);
+
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : (input as Request).url;
+        if (url === readmeUrl) {
+          return Promise.resolve(new Response(readmeContent, { status: 200 }));
+        }
+        return Promise.resolve(new Response("Not Found", { status: 404 }));
+      });
+
+      const res = await mcpRegistryRouter.request("/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ registryName: canonicalName }),
+      });
+
+      expect(res.status).toBe(201);
+      const body = InstallResponseSchema.parse(await res.json());
+
+      const readmeFetchCalls = fetchSpy.mock.calls.filter(([input]) => {
+        const u =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : (input as Request).url;
+        return u === readmeUrl;
+      });
+      expect(readmeFetchCalls).toHaveLength(1);
+
+      const persisted = await testAdapter.get(body.server.id);
+      expect(persisted?.upstream?.repositoryUrl).toBe(inferredRepoUrl);
+      expect(persisted?.readme).toBe(readmeContent);
+
+      fetchSpy.mockRestore();
+    });
+
+    it("does not infer a repo URL when name doesn't match the io.github convention", async () => {
+      const canonicalName = "com.acme.no-repo/server";
+      const upstreamEntry: UpstreamServerEntry = {
+        server: {
+          $schema: "https://registry.modelcontextprotocol.io/v0.1/schema.json",
+          name: canonicalName,
+          description: "No-repo server",
+          version: "1.0.0",
+          packages: [
+            {
+              registryType: "npm",
+              identifier: "@acme/no-repo-server",
+              version: "1.0.0",
+              transport: { type: "stdio" },
+            },
+          ],
+        },
+        _meta: {
+          "io.modelcontextprotocol.registry/official": {
+            status: "active",
+            statusChangedAt: "2025-06-15T12:00:00.000000Z",
+            publishedAt: "2025-06-15T12:00:00.000000Z",
+            updatedAt: "2025-06-15T12:00:00.000000Z",
+            isLatest: true,
+          },
+        },
+      };
+      mockFetchLatest.mockResolvedValue(upstreamEntry);
+
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response("Not Found", { status: 404 }));
+
+      const res = await mcpRegistryRouter.request("/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ registryName: canonicalName }),
+      });
+
+      expect(res.status).toBe(201);
+      const body = InstallResponseSchema.parse(await res.json());
+
+      // No README fetch attempts hit raw.githubusercontent.com.
+      const ghFetchCalls = fetchSpy.mock.calls.filter(([input]) => {
+        const u =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : (input as Request).url;
+        return u.startsWith("https://raw.githubusercontent.com/");
+      });
+      expect(ghFetchCalls).toHaveLength(0);
+
+      const persisted = await testAdapter.get(body.server.id);
+      expect(persisted?.upstream?.repositoryUrl).toBeUndefined();
+      expect(persisted?.readme).toBeUndefined();
 
       fetchSpy.mockRestore();
     });
@@ -1394,6 +1533,61 @@ describe("MCP Registry Routes", () => {
       const res = await mcpRegistryRouter.request("/nonexistent-server/update", { method: "POST" });
 
       expect(res.status).toBe(404);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Lazy backfill of upstream.repositoryUrl on update
+    // ═══════════════════════════════════════════════════════════════════════
+
+    it("backfills upstream.repositoryUrl on update for entries installed before the resolver landed", async () => {
+      const canonicalName = "io.github.legacy/backfill-target";
+      const inferredRepoUrl = "https://github.com/legacy/backfill-target";
+      const readmeUrl = `https://raw.githubusercontent.com/legacy/backfill-target/main/README.md`;
+      const id = "io-github-legacy-backfill-target";
+
+      // Seed a pre-resolver entry: registry source, upstream provenance set, but
+      // no repositoryUrl. This mirrors the state of entries installed before the
+      // fix landed.
+      await testAdapter.add({
+        id,
+        name: canonicalName,
+        source: "registry",
+        securityRating: "unverified",
+        upstream: { canonicalName, version: "1.0.0", updatedAt: "2025-01-01T00:00:00.000000Z" },
+        configTemplate: {
+          transport: { type: "stdio", command: "npx", args: ["-y", "@legacy/backfill@1.0.0"] },
+        },
+      });
+
+      // Upstream returns a fresh entry with no `repository` field — name-based
+      // inference is the only source of the URL.
+      const upstreamEntry = createNpmStdioUpstreamEntry(canonicalName, "1.1.0");
+      expect(upstreamEntry.server.repository).toBeUndefined();
+      upstreamEntry._meta["io.modelcontextprotocol.registry/official"].updatedAt =
+        "2025-12-01T00:00:00.000000Z";
+      mockFetchLatest.mockResolvedValueOnce(upstreamEntry);
+
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : (input as Request).url;
+        if (url === readmeUrl) {
+          return Promise.resolve(new Response("# Backfilled README", { status: 200 }));
+        }
+        return Promise.resolve(new Response("Not Found", { status: 404 }));
+      });
+
+      const res = await mcpRegistryRouter.request(`/${id}/update`, { method: "POST" });
+      expect(res.status).toBe(200);
+
+      const persisted = await testAdapter.get(id);
+      expect(persisted?.upstream?.repositoryUrl).toBe(inferredRepoUrl);
+      expect(persisted?.readme).toBe("# Backfilled README");
+
+      fetchSpy.mockRestore();
     });
   });
 
